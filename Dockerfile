@@ -9,4 +9,6 @@ RUN apt-get update \
  && rosdep install --from-paths /tmp/src --ignore-src -y \
  && apt-get install -y ros-jazzy-joint-state-publisher-gui \
                        ros-jazzy-ackermann-steering-controller \
+                       ros-jazzy-teleop-twist-keyboard \
+                       ros-jazzy-rmw-cyclonedds-cpp \
  && rm -rf /var/lib/apt/lists/*

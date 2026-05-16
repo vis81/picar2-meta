@@ -1,8 +1,10 @@
 IMAGE   := picar2-ros2:jazzy
 WS      := $(abspath .)
 DISPLAY ?= :0
+ROS_ENV := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+           -e CYCLONEDDS_URI=file:///ws/cyclonedds.xml
 
-.PHONY: image build rviz bringup shell clean
+.PHONY: image build rviz bringup teleop shell clean
 
 image:
 	docker build -t $(IMAGE) .
@@ -15,30 +17,31 @@ build:
 		bash -c "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install"
 
 rviz:
-	xhost +local:docker 2>/dev/null || true
-	docker run --rm -it \
-		-e DISPLAY=$(DISPLAY) \
-		-v /tmp/.X11-unix:/tmp/.X11-unix \
-		-v $(WS):/ws \
-		-w /ws \
-		$(IMAGE) \
-		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup display.launch.py"
+	docker exec -it picar2 \
+		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 run rviz2 rviz2 -d /ws/install/picar2_bringup/share/picar2_bringup/config/rviz.rviz"
 
 bringup:
+	xhost +local:docker 2>/dev/null || true
 	docker run --rm -it \
+		--name picar2 \
 		--privileged \
+		--network host \
+		$(ROS_ENV) \
+		-e DISPLAY=$(DISPLAY) \
+		-v /tmp/.X11-unix:/tmp/.X11-unix \
 		-v /dev:/dev \
 		-v $(WS):/ws \
 		-w /ws \
 		$(IMAGE) \
 		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup picar2.launch.py"
 
+teleop:
+	docker exec -it picar2 \
+		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 run teleop_twist_keyboard teleop_twist_keyboard"
+
 shell:
-	docker run --rm -it \
-		-v $(WS):/ws \
-		-w /ws \
-		$(IMAGE) \
-		bash
+	docker exec -it picar2 \
+		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && exec bash"
 
 clean:
 	rm -rf build install log
