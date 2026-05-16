@@ -8,4 +8,5 @@ RUN apt-get update \
  && rosdep update \
  && rosdep install --from-paths /tmp/src --ignore-src -y \
  && apt-get install -y ros-jazzy-joint-state-publisher-gui \
+                       ros-jazzy-ackermann-steering-controller \
  && rm -rf /var/lib/apt/lists/*
