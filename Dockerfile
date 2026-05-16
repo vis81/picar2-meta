@@ -7,4 +7,5 @@ COPY src/picar2_description/package.xml /tmp/src/picar2_description/package.xml
 RUN apt-get update \
  && rosdep update \
  && rosdep install --from-paths /tmp/src --ignore-src -y \
+ && apt-get install -y ros-jazzy-joint-state-publisher-gui \
  && rm -rf /var/lib/apt/lists/*
