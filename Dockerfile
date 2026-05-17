@@ -13,4 +13,5 @@ RUN apt-get update \
                        ros-jazzy-rmw-cyclonedds-cpp \
                        ros-jazzy-imu-filter-madgwick \
                        ros-jazzy-rviz-imu-plugin \
+                       ros-jazzy-robot-localization \
  && rm -rf /var/lib/apt/lists/*
