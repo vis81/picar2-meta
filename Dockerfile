@@ -11,4 +11,6 @@ RUN apt-get update \
                        ros-jazzy-ackermann-steering-controller \
                        ros-jazzy-teleop-twist-keyboard \
                        ros-jazzy-rmw-cyclonedds-cpp \
+                       ros-jazzy-imu-filter-madgwick \
+                       ros-jazzy-rviz-imu-plugin \
  && rm -rf /var/lib/apt/lists/*
