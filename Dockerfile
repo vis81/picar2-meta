@@ -1,4 +1,5 @@
-FROM ros:jazzy-desktop
+ARG BASE_IMAGE=osrf/ros:jazzy-desktop
+FROM ${BASE_IMAGE}
 
 COPY src/picar2_control/package.xml     /tmp/src/picar2_control/package.xml
 COPY src/picar2_bringup/package.xml     /tmp/src/picar2_bringup/package.xml

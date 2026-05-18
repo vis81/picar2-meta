@@ -1,13 +1,20 @@
 IMAGE   := picar2-ros2:jazzy
 WS      := $(abspath .)
 DISPLAY ?= :0
+# osrf/ros:jazzy-desktop is amd64-only; Pi uses the multi-arch ros-base
+ARCH    := $(shell uname -m)
+ifeq ($(ARCH),aarch64)
+BASE_IMAGE := ros:jazzy-ros-base
+else
+BASE_IMAGE := osrf/ros:jazzy-desktop
+endif
 ROS_ENV := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
            -e CYCLONEDDS_URI=file:///ws/cyclonedds.xml
 
 .PHONY: image build rviz bringup teleop shell clean
 
 image:
-	docker build -t $(IMAGE) .
+	docker build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE) .
 
 build:
 	docker run --rm \
