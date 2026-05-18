@@ -1,4 +1,4 @@
-FROM osrf/ros:jazzy-desktop
+FROM ros:jazzy-desktop
 
 COPY src/picar2_control/package.xml     /tmp/src/picar2_control/package.xml
 COPY src/picar2_bringup/package.xml     /tmp/src/picar2_bringup/package.xml
