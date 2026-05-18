@@ -1,9 +1,4 @@
 <CycloneDDS>
   <Domain>
-    <General>
-      <Interfaces>
-        <NetworkInterface name="lo"/>
-      </Interfaces>
-    </General>
   </Domain>
 </CycloneDDS>

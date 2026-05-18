@@ -1,5 +1,5 @@
 IMAGE   := picar2-ros2:jazzy
-WS      := $(abspath .)
+WS      := $(CURDIR)
 DISPLAY ?= :0
 # osrf/ros:jazzy-desktop is amd64-only; Pi uses the multi-arch ros-base
 ARCH    := $(shell uname -m)
@@ -11,7 +11,9 @@ endif
 ROS_ENV := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
            -e CYCLONEDDS_URI=file:///ws/cyclonedds.xml
 
-.PHONY: image build rviz bringup teleop shell clean
+.PHONY: all image build rviz bringup teleop shell clean
+
+all: build
 
 image:
 	docker build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE) .
@@ -24,8 +26,18 @@ build:
 		bash -c "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install"
 
 rviz:
-	docker exec -it picar2 \
-		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 run rviz2 rviz2 -d /ws/install/picar2_bringup/share/picar2_bringup/config/rviz.rviz"
+	xhost +local:docker 2>/dev/null || true
+	docker run --rm -it \
+		--network host \
+		--ipc host \
+		$(ROS_ENV) \
+		-e DISPLAY=$(DISPLAY) \
+		-e QT_XCB_NO_XI2=1 \
+		-v /tmp/.X11-unix:/tmp/.X11-unix \
+		-v $(WS):/ws \
+		-w /ws \
+		$(IMAGE) \
+		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run rviz2 rviz2 -d /ws/install/picar2_bringup/share/picar2_bringup/config/rviz.rviz"
 
 bringup:
 	xhost +local:docker 2>/dev/null || true
