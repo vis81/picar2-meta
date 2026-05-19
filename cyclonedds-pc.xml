@@ -1,0 +1,16 @@
+<CycloneDDS>
+  <Domain>
+    <General>
+      <!-- Pin to the WiFi interface so Ethernet being up doesn't confuse discovery.
+           Set PC_IFACE in the environment or pass PC_IFACE=wlp3s0 to make. -->
+      <NetworkInterfaceAddress>${PC_IFACE}</NetworkInterfaceAddress>
+    </General>
+    <Discovery>
+      <!-- Bypass multicast: talk directly to the Pi by IP.
+           Set PI_IP in the environment or pass PI_IP=x.x.x.x to make. -->
+      <Peers>
+        <Peer Address="${PI_IP}"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

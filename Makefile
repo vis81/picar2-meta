@@ -8,8 +8,14 @@ BASE_IMAGE := ros:jazzy-ros-base
 else
 BASE_IMAGE := osrf/ros:jazzy-desktop
 endif
-ROS_ENV := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-           -e CYCLONEDDS_URI=file:///ws/cyclonedds.xml
+PI_IP    ?=
+PC_IFACE ?=
+ROS_ENV    := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+              -e CYCLONEDDS_URI=file:///ws/cyclonedds.xml
+ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+              -e CYCLONEDDS_URI=file:///ws/cyclonedds-pc.xml \
+              -e PI_IP=$(PI_IP) \
+              -e PC_IFACE=$(PC_IFACE)
 
 .PHONY: all image build rviz bringup teleop shell clean
 
@@ -30,7 +36,7 @@ rviz:
 	docker run --rm -it \
 		--network host \
 		--ipc host \
-		$(ROS_ENV) \
+		$(ROS_ENV_PC) \
 		-e DISPLAY=$(DISPLAY) \
 		-e QT_XCB_NO_XI2=1 \
 		-v /tmp/.X11-unix:/tmp/.X11-unix \
