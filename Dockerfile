@@ -17,6 +17,7 @@ RUN apt-get update \
                        ros-jazzy-imu-filter-madgwick \
                        ros-jazzy-rviz-imu-plugin \
                        ros-jazzy-robot-localization \
+                       ros-jazzy-slam-toolbox \
  && arch=$(dpkg --print-architecture) \
  && if [ "$arch" = "arm64" ] || [ "$arch" = "armhf" ]; then \
         apt-get install -y python3-rpi.gpio; \

@@ -17,7 +17,7 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
               -e PI_IP=$(PI_IP) \
               -e PC_IFACE=$(PC_IFACE)
 
-.PHONY: all image build rviz bringup teleop shell clean
+.PHONY: all image build rviz bringup slam teleop shell clean
 
 all: build
 
@@ -59,6 +59,10 @@ bringup:
 		-w /ws \
 		$(IMAGE) \
 		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup picar2.launch.py"
+
+slam:
+	docker exec -it picar2 \
+		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 launch picar2_bringup slam.launch.py"
 
 teleop:
 	docker exec -it picar2 \
