@@ -8,18 +8,20 @@ COPY src/picar2_lidar/package.xml       /tmp/src/picar2_lidar/package.xml
 
 RUN apt-get update \
  && rosdep update \
+ # workspace package dependencies (declared in package.xml files)
  && rosdep install --from-paths /tmp/src --ignore-src -y \
- && apt-get install -y python3-serial \
-                       ros-jazzy-joint-state-publisher-gui \
-                       ros-jazzy-ackermann-steering-controller \
-                       ros-jazzy-teleop-twist-keyboard \
-                       ros-jazzy-rmw-cyclonedds-cpp \
-                       ros-jazzy-imu-filter-madgwick \
-                       ros-jazzy-rviz-imu-plugin \
-                       ros-jazzy-robot-localization \
-                       ros-jazzy-slam-toolbox \
-                       ros-jazzy-nav2-lifecycle-manager \
-                       ros-jazzy-cartographer-ros \
+ # middleware (not in any package.xml)
+ && apt-get install -y \
+        ros-jazzy-rmw-cyclonedds-cpp \
+ # SLAM (not in any package.xml)
+ && apt-get install -y \
+        ros-jazzy-cartographer-ros \
+ # desktop tools (not in any package.xml)
+ && apt-get install -y \
+        ros-jazzy-joint-state-publisher-gui \
+        ros-jazzy-rviz-imu-plugin \
+        ros-jazzy-teleop-twist-keyboard \
+ # Pi-only GPIO library
  && arch=$(dpkg --print-architecture) \
  && if [ "$arch" = "arm64" ] || [ "$arch" = "armhf" ]; then \
         apt-get install -y python3-rpi.gpio; \
