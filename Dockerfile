@@ -19,6 +19,7 @@ RUN apt-get update \
                        ros-jazzy-robot-localization \
                        ros-jazzy-slam-toolbox \
                        ros-jazzy-nav2-lifecycle-manager \
+                       ros-jazzy-cartographer-ros \
  && arch=$(dpkg --print-architecture) \
  && if [ "$arch" = "arm64" ] || [ "$arch" = "armhf" ]; then \
         apt-get install -y python3-rpi.gpio; \
