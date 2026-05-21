@@ -17,7 +17,7 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
               -e PI_IP=$(PI_IP) \
               -e PC_IFACE=$(PC_IFACE)
 
-.PHONY: all image build rviz bringup slam teleop shell clean
+.PHONY: all image build rviz bringup slam teleop odom-cal shell clean
 
 all: build
 
@@ -68,9 +68,26 @@ teleop:
 	docker exec -it picar2 \
 		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 run teleop_twist_keyboard teleop_twist_keyboard"
 
+odom-cal:
+	xhost +local:docker 2>/dev/null || true
+	docker run --rm -it \
+		--network host \
+		--ipc host \
+		$(ROS_ENV_PC) \
+		-e DISPLAY=$(DISPLAY) \
+		-e QT_XCB_NO_XI2=1 \
+		-v /tmp/.X11-unix:/tmp/.X11-unix \
+		-v $(WS):/ws \
+		-w /ws \
+		$(IMAGE) \
+		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run picar2_bringup odom_cal.py"
+
 shell:
 	docker exec -it picar2 \
 		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && exec bash"
+
+sync2pi:
+	rsync -avz --exclude '.git' --exclude-from='.gitignore' . pi@rpi4.local:~/picar_ws/ros2/
 
 clean:
 	rm -rf build install log
