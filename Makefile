@@ -17,7 +17,24 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
               -e PI_IP=$(PI_IP) \
               -e PC_IFACE=$(PC_IFACE)
 
-.PHONY: all image build deps rviz bringup sim slam cartographer nav explore teleop odom-cal shell clean
+FOCUS ?= imu
+WHERE ?= pi
+
+# WHERE=pi  → exec into running picar2 container (default, used on the Pi)
+# WHERE=pc  → spin up a throwaway container on the PC connected via LAN DDS
+ifeq ($(WHERE),pc)
+DEBUG_RUN = docker run --rm -it \
+	--network host \
+	--ipc host \
+	$(ROS_ENV_PC) \
+	-v $(WS):/ws \
+	-w /ws \
+	$(IMAGE)
+else
+DEBUG_RUN = docker exec -it picar2
+endif
+
+.PHONY: all image build deps rviz bringup sim slam cartographer nav explore teleop odom-cal debug diag shell clean
 
 all: build
 
@@ -115,6 +132,12 @@ odom-cal:
 		-w /ws \
 		$(IMAGE) \
 		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run picar2_bringup odom_cal.py"
+
+debug:
+	$(DEBUG_RUN) bash /ws/scripts/debug.sh $(FOCUS)
+
+diag:
+	$(DEBUG_RUN) bash /ws/scripts/diag.sh
 
 shell:
 	docker exec -it picar2 \
