@@ -17,7 +17,7 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
               -e PI_IP=$(PI_IP) \
               -e PC_IFACE=$(PC_IFACE)
 
-.PHONY: all image build rviz bringup slam cartographer nav teleop odom-cal shell clean
+.PHONY: all image build rviz bringup sim slam cartographer nav teleop odom-cal shell clean
 
 all: build
 
@@ -59,6 +59,21 @@ bringup:
 		-w /ws \
 		$(IMAGE) \
 		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup picar2.launch.py"
+
+sim:
+	xhost +local:docker 2>/dev/null || true
+	docker run --rm -it \
+		--name picar2 \
+		--network host \
+		--ipc host \
+		$(ROS_ENV) \
+		-e DISPLAY=$(DISPLAY) \
+		-e QT_XCB_NO_XI2=1 \
+		-v /tmp/.X11-unix:/tmp/.X11-unix \
+		-v $(WS):/ws \
+		-w /ws \
+		$(IMAGE) \
+		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup sim.launch.py"
 
 slam:
 	docker exec -it picar2 \

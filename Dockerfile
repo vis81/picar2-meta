@@ -19,6 +19,11 @@ RUN apt-get update \
  # navigation (not in any package.xml)
  && apt-get install -y \
         ros-jazzy-navigation2 \
+ # Gazebo Harmonic simulation (not in any package.xml)
+ && apt-get install -y \
+        ros-jazzy-ros-gz-sim \
+        ros-jazzy-ros-gz-bridge \
+        ros-jazzy-gz-ros2-control \
  # desktop tools (not in any package.xml)
  && apt-get install -y \
         ros-jazzy-joint-state-publisher-gui \
