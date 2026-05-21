@@ -16,6 +16,9 @@ RUN apt-get update \
  # SLAM (not in any package.xml)
  && apt-get install -y \
         ros-jazzy-cartographer-ros \
+ # navigation (not in any package.xml)
+ && apt-get install -y \
+        ros-jazzy-navigation2 \
  # desktop tools (not in any package.xml)
  && apt-get install -y \
         ros-jazzy-joint-state-publisher-gui \

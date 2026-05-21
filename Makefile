@@ -17,7 +17,7 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
               -e PI_IP=$(PI_IP) \
               -e PC_IFACE=$(PC_IFACE)
 
-.PHONY: all image build rviz bringup slam cartographer teleop odom-cal shell clean
+.PHONY: all image build rviz bringup slam cartographer nav teleop odom-cal shell clean
 
 all: build
 
@@ -67,6 +67,10 @@ slam:
 cartographer:
 	docker exec -it picar2 \
 		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 launch picar2_bringup cartographer.launch.py"
+
+nav:
+	docker exec -it picar2 \
+		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 launch picar2_bringup nav2.launch.py"
 
 teleop:
 	docker exec -it picar2 \
