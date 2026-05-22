@@ -16,7 +16,8 @@ case "$FOCUS" in
   imu)
     TOPICS="/imu/data_raw /imu/data /imu/mag \
             /odom /ackermann_steering_controller/odometry \
-            /joint_states /tf /tf_static"
+            /ackermann_steering_controller/reference \
+            /cmd_vel /joint_states /tf /tf_static"
     ;;
   nav)
     TOPICS="/scan /map /cmd_vel /odom /imu/data \
@@ -35,7 +36,8 @@ case "$FOCUS" in
   all)
     TOPICS="/imu/data_raw /imu/data /imu/mag \
             /odom /ackermann_steering_controller/odometry \
-            /joint_states /scan /map /cmd_vel \
+            /ackermann_steering_controller/reference \
+            /cmd_vel /joint_states /scan /map \
             /local_costmap/costmap /global_costmap/costmap \
             /tf /tf_static"
     ;;
