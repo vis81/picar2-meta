@@ -19,6 +19,7 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
 
 FOCUS    ?= imu
 WHERE    ?= pi
+IMU_ARGS ?=
 
 # WHERE=pi  → exec into running picar2 container (default, used on the Pi)
 # WHERE=pc  → spin up a throwaway container on the PC connected via LAN DDS
@@ -34,7 +35,7 @@ else
 DEBUG_RUN = docker exec -it picar2
 endif
 
-.PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop odom-cal imu-calib debug diag shell clean
+.PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop odom-cal imu-calib imu-verify debug diag shell clean
 
 all: build
 
@@ -146,6 +147,9 @@ odom-cal:
 		-w /ws \
 		$(IMAGE) \
 		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run picar2_bringup odom_cal.py"
+
+imu-verify:
+	$(DEBUG_RUN) bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && python3 /ws/scripts/imu_verify.py $(IMU_ARGS)"
 
 # Requires bringup running. Guides through 6-position accel calibration.
 # Output saved to src/picar2_bringup/config/imu_calib.yaml (used by apply_calib at bringup).
