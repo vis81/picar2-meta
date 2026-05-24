@@ -20,6 +20,8 @@ ROS_ENV_PC := -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
 FOCUS    ?= imu
 WHERE    ?= pi
 IMU_ARGS ?=
+LIDAR    ?= true
+USE_MAG  ?= false
 
 # WHERE=pi  → exec into running picar2 container (default, used on the Pi)
 # WHERE=pc  → spin up a throwaway container on the PC connected via LAN DDS
@@ -97,7 +99,7 @@ bringup:
 		-v $(WS):/ws \
 		-w /ws \
 		$(IMAGE) \
-		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup picar2.launch.py"
+		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG)"
 
 sim:
 	xhost +local:docker 2>/dev/null || true
