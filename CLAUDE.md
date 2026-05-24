@@ -72,11 +72,12 @@ Driver for LDS02RR (Neato XV-11) LiDAR.
 | joint_state_broadcaster | — | /joint_states from hw interfaces |
 | ackermann_steering_controller | — | Ackermann kinematics → steer + wheel cmds |
 | cmd_vel_relay | picar2_bringup | /cmd_vel (Twist) → controller reference (TwistStamped) |
-| imu_filter_madgwick | imu_filter_madgwick | /imu/data_raw → /imu/data (no mag, ENU) |
+| apply_calib_node | imu_calib | /imu/data_raw → /imu/data_corrected (accel scale+bias) |
+| imu_filter_madgwick | imu_filter_madgwick | /imu/data_corrected → /imu/data (no mag, ENU) |
 | ekf_node | robot_localization | odom + IMU → /odom + TF odom→base_footprint |
 | lidar_node | picar2_lidar | LiDAR driver (target_rpm=300, angle_offset=-2.8 rad) |
 
-Launch args: `port` (default `/dev/ttyYahboom0`), `baud` (460800), `lidar` (true).
+Launch args: `port` (default `/dev/ttyYahboom0`), `baud` (460800), `lidar` (true), `calib_file` (picar2_bringup/config/imu_calib.yaml).
 
 ## Hardware Interface (Picar2Hardware)
 
@@ -88,8 +89,6 @@ Launch args: `port` (default `/dev/ttyYahboom0`), `baud` (460800), `lidar` (true
 | `baud` | `460800` | UART baud rate |
 | `imu_rate_hz` | `50` | IMU stream rate (Hz) |
 | `steer_us_per_rad` | `950.0` | Servo scale µs/rad — **calibration knob** |
-| `imu_mount_roll` | `-0.1648` | IMU tilt correction (rad) — update after remount |
-| `imu_mount_pitch` | `-0.0657` | IMU tilt correction (rad) — update after remount |
 
 ### Joint Interfaces
 
