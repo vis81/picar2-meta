@@ -3,3 +3,7 @@ repositories:
     type: git
     url: https://github.com/robo-friends/m-explore-ros2.git
     version: main
+  imu_calib:
+    type: git
+    url: https://github.com/Nathan85001/imu_calib.git
+    version: ros2
