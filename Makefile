@@ -151,7 +151,7 @@ odom-cal:
 		bash -c "source /opt/ros/jazzy/setup.bash && source install/setup.bash && ros2 run picar2_bringup odom_cal.py"
 
 imu-verify:
-	$(DEBUG_RUN) bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && python3 /ws/scripts/imu_verify.py $(IMU_ARGS)"
+	$(DEBUG_RUN) bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 run picar2_bringup imu_verify.py $(IMU_ARGS)"
 
 # Requires bringup running. Guides through 6-position accel calibration.
 # Output saved to src/picar2_bringup/config/imu_calib.yaml (used by apply_calib at bringup).
