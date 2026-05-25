@@ -37,7 +37,7 @@ else
 DEBUG_RUN = docker exec -it picar2
 endif
 
-.PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop odom-cal imu-calib imu-verify debug diag shell clean
+.PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop odom-cal imu-calib imu-verify lidar-ld19 debug diag shell clean
 
 all: build
 
@@ -155,6 +155,17 @@ imu-verify:
 
 # Requires bringup running. Guides through 6-position accel calibration.
 # Output saved to src/picar2_bringup/config/imu_calib.yaml (used by apply_calib at bringup).
+lidar-ld19:
+	docker run --rm -it \
+		--privileged \
+		--network host \
+		$(ROS_ENV) \
+		-v /dev:/dev \
+		-v $(WS):/ws \
+		-w /ws \
+		$(IMAGE) \
+		bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 launch ldlidar_node ldlidar_with_mgr.launch.py"
+
 imu-calib:
 	$(DEBUG_RUN) bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash && ros2 run imu_calib do_calib_node --ros-args -r imu:=/imu/data_raw -p calib_file:=/ws/src/picar2_bringup/config/imu_calib.yaml"
 
