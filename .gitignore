@@ -1,4 +1,6 @@
 build/
+build-docker/
 install/
+install-docker/
 log/
 bags/
