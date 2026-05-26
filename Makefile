@@ -14,6 +14,7 @@ FOCUS    ?= imu
 LIDAR    ?= true
 USE_MAG  ?= false
 IMU_ARGS ?=
+LD07_PORT ?= /dev/ttyUSB0
 
 # host: run commands directly (ROS must be installed and sourced on the host)
 # docker: wrap each command in an appropriate Docker container
@@ -64,7 +65,7 @@ else
 endif
 
 .PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop \
-        odom-cal imu-calib imu-verify lidar-ld19 debug diag shell docker-shell \
+        odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
 all: build
@@ -136,6 +137,9 @@ debug:
 
 lidar-ld19:
 	$(CMD) "$(ROS_SETUP) && ros2 launch ldlidar_node ldlidar_with_mgr.launch.py"
+
+lidar-ld07:
+	$(CMD) "$(ROS_SETUP) && ros2 launch ldrobot_ld07 ld07.launch.py serial_port:=$(LD07_PORT)"
 
 # ── PC visualisation / calibration tools ────────────────────────────────────
 rviz:
