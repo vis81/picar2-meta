@@ -11,7 +11,7 @@ endif
 PI_IP    ?=
 PC_IFACE ?=
 FOCUS    ?= imu
-LIDAR    ?= true
+LIDAR    ?= lds02rr   # lds02rr | ld19 | ld07 | none
 USE_MAG  ?= false
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
