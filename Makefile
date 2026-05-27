@@ -72,7 +72,7 @@ else
 endif
 
 .PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop \
-        odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 debug diag shell docker-shell \
+        odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
 all: build
@@ -147,6 +147,10 @@ lidar-ld19:
 
 lidar-ld07:
 	$(CMD) "$(ROS_SETUP) && ros2 launch ldrobot_ld07 ld07.launch.py serial_port:=$(LD07_PORT)"
+
+lidar-ld07-view:
+	$(XHOST)
+	$(CMD) "$(ROS_SETUP_PC) && ros2 run rviz2 rviz2 -d $(WS_PATH)/install/ldrobot_ld07/share/ldrobot_ld07/config/ld07.rviz"
 
 # ── PC visualisation / calibration tools ────────────────────────────────────
 rviz:
