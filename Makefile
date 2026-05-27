@@ -45,8 +45,15 @@ ROS_SETUP_PC := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
                 source $(WS_PATH)/$(INSTALL_BASE)/setup.bash
 
 # ── docker-start flags ───────────────────────────────────────────────────────
+# gpio group name is not in the ROS base image — resolve its GID from
+# /dev/gpiomem on the host at make time.
+_GID_GPIO := $(shell stat -c '%g' /dev/gpiomem 2>/dev/null)
+
 _DOCKER_FLAGS := --privileged --network host --ipc host \
                  -u $(shell id -u):$(shell id -g) \
+                 --group-add dialout \
+                 --group-add kmem \
+                 $(if $(_GID_GPIO),--group-add $(_GID_GPIO)) \
                  -e DISPLAY=$(DISPLAY) -e QT_XCB_NO_XI2=1 \
                  -v /tmp/.X11-unix:/tmp/.X11-unix \
                  -v /dev:/dev \
