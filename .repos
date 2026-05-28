@@ -1,7 +1,7 @@
 repositories:
   lds02rr_lidar:
     type: git
-    url: /home/chia/PICAR2/lds02rr_lidar
+    url: https://github.com/vis81/lds02rr_lidar.git
     version: master
   ldrobot_ld07:
     type: git
