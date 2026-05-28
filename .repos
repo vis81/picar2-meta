@@ -1,7 +1,7 @@
 repositories:
   ldrobot_ld07:
     type: git
-    url: /home/chia/PICAR2/picar2_ws/ros2/src/ldrobot_ld07
+    url: https://github.com/vis81/ldrobot_ld07.git
     version: master
   ldrobot-lidar-ros2:
     type: git
