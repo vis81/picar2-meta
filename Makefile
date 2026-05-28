@@ -13,6 +13,7 @@ PC_IFACE ?=
 FOCUS    ?= imu
 LIDAR    ?= lds02rr   # lds02rr | ld19 | ld07 | none
 USE_MAG  ?= false
+USE_LD07 ?= true
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
 
@@ -105,7 +106,7 @@ clean:
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG)"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07)"
 
 sim:
 	$(XHOST)
