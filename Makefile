@@ -73,7 +73,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image build deps firmware flash rviz rqt bringup sim slam slam-sim cartographer nav explore teleop joystick \
+.PHONY: all image build deps firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
         odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -132,6 +132,9 @@ cartographer:
 
 nav:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py"
+
+nav-sim:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py use_sim_time:=true"
 
 explore:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup explore.launch.py"
