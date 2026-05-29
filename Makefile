@@ -16,6 +16,7 @@ USE_MAG  ?= false
 USE_LD07 ?= true
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
+JOY_ID   ?= 0
 
 # host: run commands directly (ROS must be installed and sourced on the host)
 # docker: wrap each command in an appropriate Docker container
@@ -72,7 +73,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image build deps firmware flash rviz rqt bringup sim slam cartographer nav explore teleop \
+.PHONY: all image build deps firmware flash rviz rqt bringup sim slam cartographer nav explore teleop joystick \
         odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -134,6 +135,9 @@ explore:
 
 teleop:
 	$(CMD) "$(ROS_SETUP) && ros2 run teleop_twist_keyboard teleop_twist_keyboard"
+
+joystick:
+	$(CMD) "$(ROS_SETUP) && ros2 launch teleop_twist_joy teleop-launch.py joy_dev:=$(JOY_ID) config_filepath:=$(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config/flysky.yaml"
 
 # Requires bringup running. Guides through 6-position accel calibration.
 # Output saved to src/picar2_bringup/config/imu_calib.yaml
