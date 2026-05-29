@@ -73,7 +73,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image build deps firmware flash rviz rqt bringup sim slam cartographer nav explore teleop joystick \
+.PHONY: all image build deps firmware flash rviz rqt bringup sim slam slam-sim cartographer nav explore teleop joystick \
         odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -123,6 +123,9 @@ sim:
 # ── Attach targets — exec into running bringup session (docker) / run directly (host) ──
 slam:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup slam.launch.py"
+
+slam-sim:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup slam.launch.py use_sim_time:=true"
 
 cartographer:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup cartographer.launch.py"
