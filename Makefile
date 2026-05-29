@@ -95,7 +95,7 @@ docker-stop:
 
 # ── Build & source management ────────────────────────────────────────────────
 deps:
-	$(CMD) "mkdir -p $(WS_PATH)/src && vcs import $(WS_PATH)/src < $(WS_PATH)/.repos"
+	$(CMD) "mkdir -p $(WS_PATH)/src && vcs import $(WS_PATH)/src < $(WS_PATH)/.repos && touch $(WS_PATH)/src/yahboom/COLCON_IGNORE"
 
 build:
 	$(CMD) "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
