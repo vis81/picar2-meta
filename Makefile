@@ -72,7 +72,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image build deps rviz rqt bringup sim slam cartographer nav explore teleop \
+.PHONY: all image build deps firmware flash rviz rqt bringup sim slam cartographer nav explore teleop \
         odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -102,6 +102,13 @@ build:
 
 clean:
 	rm -rf $(BUILD_BASE) $(INSTALL_BASE) log
+
+# ── Firmware (Zephyr/west, host-only) ────────────────────────────────────────
+firmware:
+	bash -c "cd $(WS)/src/yahboom && source activate.sh && make"
+
+flash:
+	bash -c "cd $(WS)/src/yahboom && source activate.sh && make flash"
 
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:

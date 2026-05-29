@@ -1,4 +1,8 @@
 repositories:
+  yahboom:
+    type: git
+    url: https://github.com/vis81/picar2-yahboom.git
+    version: master
   picar2-ros2:
     type: git
     url: https://github.com/vis81/picar2-ros2.git
