@@ -105,7 +105,10 @@ status:
 	vcs status $(WS_PATH)/src --hide-empty
 
 push:
-	vcs custom $(WS_PATH)/src --git --args push
+	@for d in $(WS_PATH)/src/*/; do \
+	  git -C "$$d" remote get-url origin 2>/dev/null | grep -q 'vis81' && \
+	    echo "=== $$d ===" && git -C "$$d" push || true; \
+	done
 
 build:
 	$(CMD) "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
