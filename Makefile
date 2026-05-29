@@ -117,7 +117,7 @@ bringup:
 
 sim:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py"
+	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(WS_PATH)/$(INSTALL_BASE)/picar2_description/share && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py"
 
 # ── Attach targets — exec into running bringup session (docker) / run directly (host) ──
 slam:
