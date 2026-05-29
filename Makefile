@@ -73,7 +73,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image build deps firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
+.PHONY: all image build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
         odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -97,6 +97,15 @@ docker-stop:
 # ── Build & source management ────────────────────────────────────────────────
 deps:
 	$(CMD) "mkdir -p $(WS_PATH)/src && vcs import $(WS_PATH)/src < $(WS_PATH)/.repos && touch $(WS_PATH)/src/yahboom/COLCON_IGNORE"
+
+pull:
+	$(CMD) "vcs pull $(WS_PATH)/src"
+
+status:
+	vcs status $(WS_PATH)/src --hide-empty
+
+push:
+	vcs custom $(WS_PATH)/src --git --args push
 
 build:
 	$(CMD) "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
