@@ -11,6 +11,7 @@ endif
 PI_IP    ?=
 PC_IFACE ?=
 FOCUS    ?= imu
+FORCE    ?=
 LIDAR    ?= lds02rr   # lds02rr | ld19 | ld07 | none
 USE_MAG  ?= false
 USE_LD07 ?= true
@@ -98,8 +99,16 @@ docker-stop:
 deps:
 	$(CMD) "mkdir -p $(WS_PATH)/src && vcs import $(WS_PATH)/src < $(WS_PATH)/.repos && touch $(WS_PATH)/src/yahboom/COLCON_IGNORE"
 
+ifeq ($(FORCE),)
 pull:
 	$(CMD) "vcs pull $(WS_PATH)/src"
+else
+pull:
+	@for d in $(WS_PATH)/src/*/; do \
+	  git -C "$$d" fetch --all 2>/dev/null && \
+	  git -C "$$d" reset --hard @{u} 2>/dev/null || true; \
+	done
+endif
 
 status:
 	vcs status $(WS_PATH)/src --hide-empty
@@ -107,7 +116,7 @@ status:
 push:
 	@for d in $(WS_PATH)/src/*/; do \
 	  git -C "$$d" remote get-url origin 2>/dev/null | grep -q 'vis81' && \
-	    echo "=== $$d ===" && git -C "$$d" push || true; \
+	    echo "=== $$d ===" && git -C "$$d" push $(if $(FORCE),--force-with-lease) || true; \
 	done
 
 build:
