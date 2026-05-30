@@ -70,3 +70,51 @@ make docker-stop                  # stop container
 ```bash
 make rviz PI_IP=<pi-ip> PC_IFACE=<iface>
 ```
+
+## Time synchronisation (chrony)
+
+Accurate clock agreement between PC and Pi is required for TF lookups over LAN.
+Without it, sensor timestamps arrive slightly in the future on the PC side, causing
+`tf2` extrapolation errors and ghost points in RViz.
+
+Docker containers inherit the host clock — no extra chrony config is needed inside containers.
+
+### PC (NTP server)
+
+```bash
+sudo apt install chrony
+
+# /etc/chrony/chrony.conf — add these lines:
+#   allow 192.168.0.0/16   # allow Pi to query this PC
+#   local stratum 8        # serve time even when not synced upstream
+
+sudo systemctl restart chrony
+chronyc clients             # verify Pi appears here after Pi is configured
+```
+
+### Pi (NTP client)
+
+```bash
+sudo apt install chrony
+
+# /etc/chrony/chrony.conf — replace default pool lines with:
+#   server <PC_IP> iburst prefer
+
+sudo systemctl restart chrony
+chronyc sources -v          # verify PC shows as * (selected source)
+chronyc tracking            # check offset — should settle below ±5 ms
+```
+
+### Verify sync is working
+
+```bash
+# On Pi:
+chronyc sources -v
+# Should show one line with * (selected) pointing at your PC IP
+
+# On PC — confirm Pi is a client:
+chronyc clients
+
+# Quick offset check from either side:
+chronyc tracking | grep "System time"
+```
