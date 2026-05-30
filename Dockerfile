@@ -1,10 +1,10 @@
 ARG BASE_IMAGE=osrf/ros:jazzy-desktop
 FROM ${BASE_IMAGE}
 
-COPY src/picar2_control/package.xml     /tmp/src/picar2_control/package.xml
-COPY src/picar2_bringup/package.xml     /tmp/src/picar2_bringup/package.xml
-COPY src/picar2_description/package.xml /tmp/src/picar2_description/package.xml
-COPY src/picar2_lidar/package.xml       /tmp/src/picar2_lidar/package.xml
+COPY src/picar2-ros2/picar2_control/package.xml     /tmp/src/picar2_control/package.xml
+COPY src/picar2-ros2/picar2_bringup/package.xml     /tmp/src/picar2_bringup/package.xml
+COPY src/picar2-ros2/picar2_description/package.xml /tmp/src/picar2_description/package.xml
+COPY src/lds02rr_lidar/package.xml                  /tmp/src/lds02rr_lidar/package.xml
 
 RUN apt-get update \
  && rosdep update \
