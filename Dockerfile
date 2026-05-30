@@ -24,6 +24,9 @@ RUN apt-get update \
         ros-jazzy-ros-gz-sim \
         ros-jazzy-ros-gz-bridge \
         ros-jazzy-gz-ros2-control \
+ # magnetometer calibration pipeline
+ && apt-get install -y \
+        ros-jazzy-magnetometer-pipeline \
  # desktop tools (not in any package.xml)
  && apt-get install -y \
         ros-jazzy-joint-state-publisher-gui \
