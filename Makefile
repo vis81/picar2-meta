@@ -75,7 +75,7 @@ else
 endif
 
 .PHONY: all image build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
-        odom-cal imu-calib imu-verify lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
+        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
 all: build
@@ -170,6 +170,16 @@ joystick:
 # Output saved to src/picar2_bringup/config/imu_calib.yaml
 imu-calib:
 	$(CMD) "$(ROS_SETUP) && ros2 run imu_calib do_calib_node --ros-args -r imu:=/imu/data_raw -p calib_file:=$(WS_PATH)/src/picar2_bringup/config/imu_calib.yaml"
+
+# Requires bringup running (Pi). Starts bias observer + remover on PC.
+# Trigger calibration in another terminal:
+#   ros2 service call /calibrate_magnetometer std_srvs/srv/Trigger {}
+# Then rotate the robot 360° for ~30 s. Bias saved to picar2_bringup/config/magnetometer_calib.yaml
+mag-calib:
+	$(XHOST)
+	$(CMD) "$(ROS_SETUP_PC) && ros2 launch magnetometer_pipeline bias_remover.launch \
+		two_d_mode:=true \
+		calibration_file_path:=$(WS_PATH)/src/picar2-ros2/picar2_bringup/config/magnetometer_calib.yaml"
 
 diag:
 	$(CMD) "bash $(WS_PATH)/scripts/diag.sh"
