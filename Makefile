@@ -225,4 +225,4 @@ docker-shell:
 
 # ── Sync to Pi ───────────────────────────────────────────────────────────────
 sync2pi:
-	rsync -avz --exclude '.git' --exclude-from='.gitignore' . pi@rpi4.local:~/picar_ws/ros2/
+	rsync -avz --exclude '.git' --exclude-from='.gitignore' src/picar2-ros2/ pi@rpi4.local:~/picar_ws/src/picar2-ros2/
