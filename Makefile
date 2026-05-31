@@ -97,24 +97,24 @@ docker-stop:
 
 # ── Build & source management ────────────────────────────────────────────────
 deps:
-	$(CMD) "mkdir -p $(WS_PATH)/src && vcs import $(WS_PATH)/src < $(WS_PATH)/.repos && touch $(WS_PATH)/src/yahboom/COLCON_IGNORE"
+	bash -c "mkdir -p $(WS)/src && vcs import $(WS)/src < $(WS)/.repos && touch $(WS)/src/yahboom/COLCON_IGNORE"
 
 ifeq ($(FORCE),)
 pull:
-	$(CMD) "vcs pull $(WS_PATH)/src"
+	vcs pull $(WS)/src
 else
 pull:
-	@for d in $(WS_PATH)/src/*/; do \
+	@for d in $(WS)/src/*/; do \
 	  git -C "$$d" fetch --all 2>/dev/null && \
 	  git -C "$$d" reset --hard @{u} 2>/dev/null || true; \
 	done
 endif
 
 status:
-	vcs status $(WS_PATH)/src --hide-empty
+	vcs status $(WS)/src --hide-empty
 
 push:
-	@for d in $(WS_PATH)/src/*/; do \
+	@for d in $(WS)/src/*/; do \
 	  git -C "$$d" remote get-url origin 2>/dev/null | grep -q 'vis81' && \
 	    echo "=== $$d ===" && git -C "$$d" push $(if $(FORCE),--force-with-lease) || true; \
 	done
