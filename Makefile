@@ -123,7 +123,7 @@ build:
 	$(CMD) "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
 
 clean:
-	rm -rf $(BUILD_BASE) $(INSTALL_BASE) log
+	$(CMD) "rm -rf $(WS_PATH)/$(BUILD_BASE) $(WS_PATH)/$(INSTALL_BASE) $(WS_PATH)/log"
 
 # ── Firmware (Zephyr/west, host-only) ────────────────────────────────────────
 firmware:
