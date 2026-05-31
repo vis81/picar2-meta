@@ -101,9 +101,11 @@ deps:
 
 ifeq ($(FORCE),)
 pull:
+	git -C $(WS) pull
 	vcs pull $(WS)/src
 else
 pull:
+	git -C $(WS) fetch --all && git -C $(WS) reset --hard @{u}
 	@for d in $(WS)/src/*/; do \
 	  git -C "$$d" fetch --all 2>/dev/null && \
 	  git -C "$$d" reset --hard @{u} 2>/dev/null || true; \
@@ -111,9 +113,11 @@ pull:
 endif
 
 status:
+	git -C $(WS) status
 	vcs status $(WS)/src --hide-empty
 
 push:
+	git -C $(WS) push $(if $(FORCE),--force-with-lease)
 	@for d in $(WS)/src/*/; do \
 	  git -C "$$d" remote get-url origin 2>/dev/null | grep -q 'vis81' && \
 	    echo "=== $$d ===" && git -C "$$d" push $(if $(FORCE),--force-with-lease) || true; \
