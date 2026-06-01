@@ -13,8 +13,10 @@ PC_IFACE ?=
 FOCUS    ?= imu
 FORCE    ?=
 LIDAR    ?= ld19   # ld19 | lds02rr | none
-USE_MAG  ?= true
-USE_LD07 ?= true
+USE_MAG     ?= true
+USE_LD07    ?= false
+USE_SEN0628 ?= true
+SEN0628_PORT ?= /dev/sen0628
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
 JOY_ID   ?= 0
@@ -55,6 +57,7 @@ _GID_GPIO := $(shell stat -c '%g' /dev/gpiomem 2>/dev/null)
 _DOCKER_FLAGS := --privileged --network host --ipc host \
                  -u $(shell id -u):$(shell id -g) \
                  --group-add dialout \
+                 --group-add plugdev \
                  --group-add kmem \
                  $(if $(_GID_GPIO),--group-add $(_GID_GPIO)) \
                  -e DISPLAY=$(DISPLAY) -e QT_XCB_NO_XI2=1 \
@@ -139,7 +142,7 @@ flash:
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07)"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT)"
 
 sim:
 	$(XHOST)
@@ -237,5 +240,5 @@ docker-shell:
 # ── Sync to Pi ───────────────────────────────────────────────────────────────
 sync2pi:
 	rsync -avz --exclude '.git' --exclude 'build' --exclude 'install' --exclude 'log' \
-		--exclude 'build-docker' --exclude 'install-docker' \
+		--exclude 'build-docker' --exclude 'install-docker' --exclude 'setenv.sh' \
 		. pi@rpi4.local:~/picar_ws/
