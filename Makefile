@@ -75,7 +75,7 @@ else
 endif
 
 .PHONY: all image build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
-        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view debug diag shell docker-shell \
+        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
 all: build
@@ -204,6 +204,13 @@ lidar-ld07:
 lidar-ld07-view:
 	$(XHOST)
 	$(CMD) "$(ROS_SETUP_PC) && ros2 run rviz2 rviz2 -d $(WS_PATH)/install/ldrobot_ld07/share/ldrobot_ld07/config/ld07.rviz"
+
+sen0628:
+	$(CMD) "$(ROS_SETUP) && ros2 launch tof_imager_ros tof_imager.launch.py"
+
+sen0628-view:
+	$(XHOST)
+	$(CMD) "$(ROS_SETUP_PC) && ros2 run rviz2 rviz2 -d $(WS_PATH)/install/tof_imager_ros/share/tof_imager_ros/config/sen0628.rviz"
 
 # ── PC visualisation / calibration tools ────────────────────────────────────
 rviz:
