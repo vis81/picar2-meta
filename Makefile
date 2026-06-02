@@ -19,6 +19,7 @@ LIDAR    ?= ld19   # ld19 | lds02rr | none
 WORLD    ?= room
 SPAWN_X  ?= 0
 SPAWN_Y  ?= 0
+HEADLESS ?= false   # true = server-only (no Gazebo GUI window)
 USE_MAG     ?= true
 USE_LD07    ?= false
 USE_SEN0628 ?= true
@@ -172,7 +173,7 @@ bringup:
 sim:
 	$(XHOST)
 	$(eval _PATCHED_WORLD := $(shell python3 $(WS)/scripts/patch_gz_world.py $(_WORLD_PATH)))
-	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(_GZ_RESOURCE_PATH) && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) world:=$(_PATCHED_WORLD) spawn_x:=$(SPAWN_X) spawn_y:=$(SPAWN_Y)"
+	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(_GZ_RESOURCE_PATH) && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) headless:=$(HEADLESS) world:=$(_PATCHED_WORLD) spawn_x:=$(SPAWN_X) spawn_y:=$(SPAWN_Y)"
 
 # ── Attach targets — exec into running bringup session (docker) / run directly (host) ──
 slam:
