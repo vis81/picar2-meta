@@ -13,6 +13,12 @@ PC_IFACE ?=
 FOCUS    ?= imu
 FORCE    ?=
 LIDAR    ?= ld19   # ld19 | lds02rr | none
+# Available worlds (from src/robotnik_gazebo_worlds/):
+#   room | electrical_substation | opil_factory | rubber_factory | warehouse |
+#   photovoltaic_station | robotnik_lab | robotnik_lab_simplifyed
+WORLD    ?= room
+SPAWN_X  ?= 0
+SPAWN_Y  ?= 0
 USE_MAG     ?= true
 USE_LD07    ?= false
 USE_SEN0628 ?= true
@@ -35,6 +41,15 @@ else
 WS_PATH      := $(WS)
 BUILD_BASE   := build
 INSTALL_BASE := install
+endif
+
+# ── World file path resolution ───────────────────────────────────────────────
+ifeq ($(WORLD),room)
+_WORLD_PATH      := $(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/worlds/room.sdf
+_GZ_RESOURCE_PATH := $(WS_PATH)/$(INSTALL_BASE)/picar2_description/share
+else
+_WORLD_PATH      := $(WS_PATH)/$(INSTALL_BASE)/$(WORLD)_world/share/$(WORLD)_world/worlds/$(WORLD).world
+_GZ_RESOURCE_PATH := $(WS_PATH)/$(INSTALL_BASE)/$(WORLD)_world/share/$(WORLD)_world/models:$(WS_PATH)/$(INSTALL_BASE)/picar2_description/share
 endif
 
 # ── ROS setup strings (inlined into every bash -c command) ───────────────────
@@ -77,7 +92,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -156,7 +171,8 @@ bringup:
 
 sim:
 	$(XHOST)
-	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(WS_PATH)/$(INSTALL_BASE)/picar2_description/share && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py use_mag:=$(USE_MAG)"
+	$(eval _PATCHED_WORLD := $(shell python3 $(WS)/scripts/patch_gz_world.py $(_WORLD_PATH)))
+	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(_GZ_RESOURCE_PATH) && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) world:=$(_PATCHED_WORLD) spawn_x:=$(SPAWN_X) spawn_y:=$(SPAWN_Y)"
 
 # ── Attach targets — exec into running bringup session (docker) / run directly (host) ──
 slam:
@@ -176,6 +192,9 @@ nav-sim:
 
 explore:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup explore.launch.py"
+
+explore-sim:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup explore.launch.py use_sim_time:=true"
 
 teleop:
 	$(CMD) "$(ROS_SETUP) && ros2 run teleop_twist_keyboard teleop_twist_keyboard"

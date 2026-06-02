@@ -35,3 +35,7 @@ repositories:
     type: git
     url: https://github.com/vis81/tof_imager_ros.git
     version: master
+  robotnik_gazebo_worlds:
+    type: git
+    url: https://github.com/RobotnikAutomation/robotnik_gazebo_worlds.git
+    version: jazzy-devel
