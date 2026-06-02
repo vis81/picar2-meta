@@ -77,7 +77,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view debug diag shell docker-shell \
         docker-start docker-stop sync2pi clean
 
@@ -86,6 +86,16 @@ all: build
 # ── Docker image ─────────────────────────────────────────────────────────────
 image:
 	docker build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE) .
+
+# Build arm64 image on PC via QEMU emulation, then push to Pi.
+# One-time setup: sudo apt-get install docker-buildx-plugin
+#                 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+#                 docker buildx create --name multiarch && docker buildx use multiarch && docker buildx inspect --bootstrap
+image-pi:
+	docker buildx build --platform linux/arm64 --build-arg BASE_IMAGE=ros:jazzy-ros-base -t $(IMAGE) --load .
+
+image-push:
+	docker save $(IMAGE) | gzip | ssh pi@$(PI_IP) 'docker load'
 
 # ── Persistent container (use with EXEC_ENV=docker) ──────────────────────────
 # Starts a long-lived container with all necessary flags. All make targets
