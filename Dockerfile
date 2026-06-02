@@ -19,22 +19,25 @@ RUN apt-get update \
  # navigation (not in any package.xml)
  && apt-get install -y \
         ros-jazzy-navigation2 \
- # Gazebo Harmonic simulation (not in any package.xml)
- && apt-get install -y \
-        ros-jazzy-ros-gz-sim \
-        ros-jazzy-ros-gz-bridge \
-        ros-jazzy-gz-ros2-control \
  # magnetometer calibration pipeline
  && apt-get install -y \
         ros-jazzy-magnetometer-pipeline \
- # desktop tools (not in any package.xml)
+ # teleop (used on both Pi and PC)
  && apt-get install -y \
-        ros-jazzy-joint-state-publisher-gui \
-        ros-jazzy-rviz-imu-plugin \
         ros-jazzy-teleop-twist-keyboard \
- # Pi-only GPIO library
+ # SEN0628 ToF sensor I2C support + Pi-only GPIO library
+ && apt-get install -y python3-smbus \
  && arch=$(dpkg --print-architecture) \
  && if [ "$arch" = "arm64" ] || [ "$arch" = "armhf" ]; then \
         apt-get install -y python3-rpi.gpio; \
+    fi \
+ # PC-only: Gazebo simulation + GUI tools (pyside2/Qt crash under QEMU cross-build)
+ && if [ "$arch" != "arm64" ] && [ "$arch" != "armhf" ]; then \
+        apt-get install -y \
+            ros-jazzy-ros-gz-sim \
+            ros-jazzy-ros-gz-bridge \
+            ros-jazzy-gz-ros2-control \
+            ros-jazzy-joint-state-publisher-gui \
+            ros-jazzy-rviz-imu-plugin; \
     fi \
  && rm -rf /var/lib/apt/lists/*
