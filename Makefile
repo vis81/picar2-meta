@@ -95,7 +95,7 @@ endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view debug diag shell docker-shell \
-        docker-start docker-stop sync2pi softap softap-down clean
+        docker-start docker-stop sync2pi softap softap-down install-uarts clean
 
 all: build
 
@@ -286,3 +286,16 @@ softap:
 
 softap-down:
 	sudo bash $(WS)/etc/setup-softap.sh --teardown
+
+# ── Host UART setup — udev symlinks + zephyr-shell socat bridge ──────────────
+# Installs /etc/udev/rules.d/99-picar.rules (symlinks: ttyYahboom{0,1},
+# ldlidar, ld07, sen0628) and /etc/systemd/system/zephyr-shell.service which
+# exposes ttyYahboom1 over TCP 4444 via socat for `putty -raw <pi-ip> 4444`.
+install-uarts:
+	sudo apt-get install -y socat
+	sudo cp $(WS)/etc/99-picar.rules /etc/udev/rules.d/
+	sudo udevadm control --reload-rules && sudo udevadm trigger
+	sudo cp $(WS)/etc/zephyr-shell.service /etc/systemd/system/
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now zephyr-shell
+	@echo "Done — unplug and replug USB adapters, then connect via: putty -raw <pi-ip> 4444"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Zephyr shell UART over TCP (port 4444)
+After=dev-ttyYahboom1.device
+BindsTo=dev-ttyYahboom1.device
+
+[Service]
+ExecStart=/usr/bin/socat TCP-LISTEN:4444,reuseaddr,fork /dev/ttyYahboom1,b921600,raw,echo=0
+Restart=on-failure
+RestartSec=3
+SuccessExitStatus=143
+
+[Install]
+WantedBy=dev-ttyYahboom1.device
