@@ -5,6 +5,11 @@ COPY src/picar2-ros2/picar2_control/package.xml     /tmp/src/picar2_control/pack
 COPY src/picar2-ros2/picar2_bringup/package.xml     /tmp/src/picar2_bringup/package.xml
 COPY src/picar2-ros2/picar2_description/package.xml /tmp/src/picar2_description/package.xml
 COPY src/lds02rr_lidar/package.xml                  /tmp/src/lds02rr_lidar/package.xml
+COPY src/vizanti/vizanti/package.xml                /tmp/src/vizanti/package.xml
+COPY src/vizanti/vizanti_cpp/package.xml            /tmp/src/vizanti_cpp/package.xml
+COPY src/vizanti/vizanti_msgs/package.xml           /tmp/src/vizanti_msgs/package.xml
+COPY src/vizanti/vizanti_server/package.xml         /tmp/src/vizanti_server/package.xml
+COPY src/vizanti/vizanti_demos/package.xml          /tmp/src/vizanti_demos/package.xml
 
 RUN apt-get update \
  && rosdep update \
@@ -31,6 +36,13 @@ RUN apt-get update \
  # Foxglove WebSocket bridge — Foxglove Studio visualization (Pi + PC)
  && apt-get install -y \
         ros-jazzy-foxglove-bridge \
+ # Vizanti runtime — Flask UI + WSGI server + scipy for vizanti_demos
+ # (also pulled via rosdep from vizanti_server/package.xml; explicit for safety)
+ && apt-get install -y \
+        ros-jazzy-rosbridge-suite \
+        python3-flask \
+        python3-waitress \
+        python3-scipy \
  # SEN0628 ToF sensor I2C support + Pi-only GPIO library
  && apt-get install -y python3-smbus \
  && arch=$(dpkg --print-architecture) \

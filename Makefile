@@ -25,6 +25,9 @@ USE_LD07    ?= false
 USE_SEN0628 ?= true
 USE_FOXGLOVE ?= true
 FOXGLOVE_PORT ?= 8765
+USE_VIZANTI ?= true
+VIZANTI_PORT ?= 5000
+VIZANTI_ROSBRIDGE_PORT ?= 5001
 SEN0628_PORT ?= /dev/sen0628
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
@@ -96,7 +99,7 @@ else
 endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
-        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove debug diag shell docker-shell \
+        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap softap-down install-uarts clean
 
 all: build
@@ -170,7 +173,7 @@ flash:
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT)"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT) use_vizanti:=$(USE_VIZANTI) vizanti_port:=$(VIZANTI_PORT) vizanti_rosbridge_port:=$(VIZANTI_ROSBRIDGE_PORT)"
 
 sim:
 	$(XHOST)
@@ -250,6 +253,10 @@ sen0628-view:
 # Standalone foxglove_bridge — connect from Foxglove Studio to ws://<host>:8765
 foxglove:
 	$(CMD) "$(ROS_SETUP) && ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=$(FOXGLOVE_PORT)"
+
+# Standalone Vizanti — open http://<host>:5000 in a browser
+vizanti:
+	$(CMD) "$(ROS_SETUP) && ros2 launch vizanti_server vizanti_server.launch.py port:=$(VIZANTI_PORT) port_rosbridge:=$(VIZANTI_ROSBRIDGE_PORT) flask_debug:=False"
 
 # ── PC visualisation / calibration tools ────────────────────────────────────
 rviz:

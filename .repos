@@ -39,3 +39,7 @@ repositories:
     type: git
     url: https://github.com/RobotnikAutomation/robotnik_gazebo_worlds.git
     version: jazzy-devel
+  vizanti:
+    type: git
+    url: https://github.com/MoffKalast/vizanti.git
+    version: ros2
