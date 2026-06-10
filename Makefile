@@ -23,6 +23,8 @@ HEADLESS ?= false   # true = server-only (no Gazebo GUI window)
 USE_MAG     ?= true
 USE_LD07    ?= false
 USE_SEN0628 ?= true
+USE_FOXGLOVE ?= true
+FOXGLOVE_PORT ?= 8765
 SEN0628_PORT ?= /dev/sen0628
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
@@ -94,7 +96,7 @@ else
 endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
-        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view debug diag shell docker-shell \
+        odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap softap-down install-uarts clean
 
 all: build
@@ -168,7 +170,7 @@ flash:
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT)"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT)"
 
 sim:
 	$(XHOST)
@@ -244,6 +246,10 @@ sen0628:
 sen0628-view:
 	$(XHOST)
 	$(CMD) "$(ROS_SETUP_PC) && ros2 run rviz2 rviz2 -d $(WS_PATH)/install/tof_imager_ros/share/tof_imager_ros/config/sen0628.rviz"
+
+# Standalone foxglove_bridge — connect from Foxglove Studio to ws://<host>:8765
+foxglove:
+	$(CMD) "$(ROS_SETUP) && ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=$(FOXGLOVE_PORT)"
 
 # ── PC visualisation / calibration tools ────────────────────────────────────
 rviz:

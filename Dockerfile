@@ -28,6 +28,9 @@ RUN apt-get update \
  # point cloud processing (pcl_ros filter nodes for sen0628)
  && apt-get install -y \
         ros-jazzy-pcl-ros \
+ # Foxglove WebSocket bridge — Foxglove Studio visualization (Pi + PC)
+ && apt-get install -y \
+        ros-jazzy-foxglove-bridge \
  # SEN0628 ToF sensor I2C support + Pi-only GPIO library
  && apt-get install -y python3-smbus \
  && arch=$(dpkg --print-architecture) \
