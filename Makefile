@@ -95,7 +95,7 @@ endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view debug diag shell docker-shell \
-        docker-start docker-stop sync2pi clean
+        docker-start docker-stop sync2pi softap softap-down clean
 
 all: build
 
@@ -272,3 +272,17 @@ sync2pi:
 	rsync -avz --exclude '.git' --exclude 'build' --exclude 'install' --exclude 'log' \
 		--exclude 'build-docker' --exclude 'install-docker' --exclude 'setenv.sh' \
 		. pi@rpi4.local:~/picar_ws/
+
+# ── SoftAP (host-only — configures NetworkManager on the Pi, not in container) ─
+# Concurrent AP+STA on wlan0 (creates uap0 virtual interface).
+# Usage:
+#   make softap SSID=picar PASS=mysecret123
+#   make softap-down
+SSID ?= picar-ap
+PASS ?= changeme1234
+
+softap:
+	sudo SSID='$(SSID)' PASS='$(PASS)' bash $(WS)/etc/setup-softap.sh
+
+softap-down:
+	sudo bash $(WS)/etc/setup-softap.sh --teardown
