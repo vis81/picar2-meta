@@ -284,7 +284,7 @@ docker-shell:
 sync2pi:
 	rsync -avz --exclude '.git' --exclude 'build' --exclude 'install' --exclude 'log' \
 		--exclude 'build-docker' --exclude 'install-docker' --exclude 'setenv.sh' \
-		. pi@rpi4.local:~/picar_ws/
+		. pi@$(PI_IP):~/picar_ws/
 
 # ── SoftAP (host-only — configures NetworkManager on the Pi, not in container) ─
 # Concurrent AP+STA on wlan0 (creates uap0 virtual interface).
