@@ -31,6 +31,19 @@ const MEDIAMTX_PORT     = 8889;
 const WHEP_PATH         = `https://${location.hostname}:${MEDIAMTX_PORT}/cam/whep`;
 const ROSBRIDGE_PORT    = 5001;
 const TOPIC             = '/pan_tilt_controller/commands';
+const CMD_VEL_TOPIC     = '/cmd_vel';
+const CMD_VEL_TYPE      = 'geometry_msgs/Twist';
+const NAV_CANCEL_SVC    = '/navigate_to_pose/_action/cancel_goal';
+const NAV_CANCEL_TYPE   = 'action_msgs/srv/CancelGoal';
+
+// Drive limits — match controllers.yaml (desired_linear_vel: 0.40,
+// max_reverse_vel: 0.25, max_angular_vel: 1.2). Slightly under angular so
+// the controller never refuses a command.
+const MAX_LIN_FWD       = 0.40;      // m/s forward
+const MAX_LIN_REV       = 0.25;      // m/s reverse
+const MAX_ANG           = 1.00;      // rad/s
+const CMD_VEL_HZ        = 10;        // matches controller_frequency in nav2.yaml
+const CMD_VEL_PERIOD_MS = 1000 / CMD_VEL_HZ;
 
 // PC input sensitivities
 const MOUSE_RAD_PER_PX  = 0.004;     // ~0.23°/px — feel-tuned for FPS-style look
@@ -49,6 +62,10 @@ const STICK_DEADZONE    = 0.15;      // ignore drift near the centre
 // Shared setpoint state. WebXR loop, mouse drag, and keyboard all write here;
 // one publisher reads from here at PUBLISH_HZ and pushes through rosbridge.
 const state = { pan: 0, tilt: 0, dirty: true, source: 'idle' };
+
+// True while the PC deadman (Space) is held. While true, mouse drag and
+// keyboard WASD don't move pan/tilt — they're repurposed for driving.
+let pcDeadman = false;
 
 const $ = id => document.getElementById(id);
 
@@ -153,21 +170,58 @@ class RosBridge {
   }
   _onopen() {
     setStatus('rosStatus', 'connected', 'ok');
-    this.ws.send(JSON.stringify({
+    this._send({
       op: 'advertise',
       topic: TOPIC,
       type: 'std_msgs/Float64MultiArray',
-    }));
+    });
+    this._send({
+      op: 'advertise',
+      topic: CMD_VEL_TOPIC,
+      type: CMD_VEL_TYPE,
+    });
     this.advertised = true;
   }
+  _send(obj) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(obj));
+    }
+  }
   publish(pan, tilt) {
-    if (!this.advertised || this.ws.readyState !== WebSocket.OPEN) return false;
-    this.ws.send(JSON.stringify({
+    if (!this.advertised) return false;
+    this._send({
       op: 'publish',
       topic: TOPIC,
       msg: { data: [pan, tilt] },
-    }));
+    });
     return true;
+  }
+  publishCmdVel(linear, angular) {
+    if (!this.advertised) return false;
+    this._send({
+      op: 'publish',
+      topic: CMD_VEL_TOPIC,
+      msg: {
+        linear:  { x: linear,  y: 0, z: 0 },
+        angular: { x: 0, y: 0, z: angular },
+      },
+    });
+    return true;
+  }
+  cancelNav() {
+    // Empty UUID + zero stamp means "cancel all goals" per the
+    // action_msgs/srv/CancelGoal contract used by Nav2.
+    this._send({
+      op: 'call_service',
+      service: NAV_CANCEL_SVC,
+      type: NAV_CANCEL_TYPE,
+      args: {
+        goal_info: {
+          goal_id: { uuid: new Array(16).fill(0) },
+          stamp: { sec: 0, nanosec: 0 },
+        },
+      },
+    });
   }
 }
 
@@ -315,7 +369,7 @@ function makeVideoRenderer(gl, videoEl) {
   };
 }
 
-async function enterVR() {
+async function enterVR(ros) {
   if (!('xr' in navigator)) {
     setStatus('status', 'no WebXR', 'err'); return;
   }
@@ -333,34 +387,104 @@ async function enterVR() {
 
   const drawEye = makeVideoRenderer(gl, $('cam'));
 
-  // Left-thumbstick Y → live scale adjustment. Right stick is reserved for
-  // future car-movement bindings. Left X button (lower face button) ends
-  // the session — easier than reaching for the Meta button.
-  //   gamepad.axes[2] = x (left/right), axes[3] = y (up/down, up = negative).
-  //   gamepad.buttons[4] = X on left controller / A on right controller.
-  // Up = grow (closer / bigger panel); down = shrink (farther / smaller).
+  // Controller bindings:
+  //   LEFT  thumbstick Y  → live video panel scale (zoom-in/out)
+  //   LEFT  X button      → end VR session
+  //   LEFT  Y button      → cancel any active Nav2 goal (edge-trigger)
+  //   RIGHT thumbstick Y  → forward / reverse velocity
+  //   RIGHT thumbstick X  → angular velocity
+  //   RIGHT grip          → deadman; cmd_vel is forced to zero unless held
+  //   RIGHT A button      → recenter pan/tilt servos to (0, 0)
+  // gamepad layout (Quest XR Standard):
+  //   axes[2,3] = thumbstick X, Y (up = negative Y)
+  //   buttons[1] = grip, [4] = X/A (lower face), [5] = Y/B (upper face)
   let scale = VIDEO_SCALE;
   let lastT = 0;
-  let prevXPressed = false;
+  let prevLX = false;        // left X (exit VR)
+  let prevLY = false;        // left Y (nav cancel)
+  let prevRA = false;        // right A (recenter)
+  let lastCmdVelMs = 0;
+  let cmdVelDirty = false;   // suppress zero-spam: only publish (0,0) once after stop
+  let deadman = false;       // right-grip held — see head-pose loop below
 
   function pollControllers(dtSec) {
+    let leftPad = null, rightPad = null;
     for (const src of session.inputSources) {
-      if (src.handedness !== 'left' || !src.gamepad) continue;
+      if (src.handedness === 'left'  && src.gamepad) leftPad  = src.gamepad;
+      if (src.handedness === 'right' && src.gamepad) rightPad = src.gamepad;
+    }
 
-      // X button — edge-trigger (only fires on press transition, not while held).
-      const xPressed = src.gamepad.buttons[4]?.pressed ?? false;
-      if (xPressed && !prevXPressed) {
-        session.end();
-        return;
+    // ── Left controller ─────────────────────────────────────────────────
+    if (leftPad) {
+      // X — exit session.
+      const x = leftPad.buttons[4]?.pressed ?? false;
+      if (x && !prevLX) { session.end(); return; }
+      prevLX = x;
+
+      // Y — cancel nav goal.
+      const y = leftPad.buttons[5]?.pressed ?? false;
+      if (y && !prevLY) { ros.cancelNav(); }
+      prevLY = y;
+
+      // Stick Y — scale.
+      const sy = leftPad.axes[3] ?? 0;
+      if (Math.abs(sy) >= STICK_DEADZONE) {
+        const delta = -sy * VIDEO_SCALE_RATE * dtSec;
+        scale = Math.min(VIDEO_SCALE_MAX,
+                         Math.max(VIDEO_SCALE_MIN, scale + delta));
       }
-      prevXPressed = xPressed;
+    }
 
-      const y = src.gamepad.axes[3] ?? 0;
-      if (Math.abs(y) < STICK_DEADZONE) continue;
-      // Up (negative axis) → larger scale, down → smaller.
-      const delta = -y * VIDEO_SCALE_RATE * dtSec;
-      scale = Math.min(VIDEO_SCALE_MAX,
-                       Math.max(VIDEO_SCALE_MIN, scale + delta));
+    // ── Right controller — drive ────────────────────────────────────────
+    if (rightPad) {
+      const a    = rightPad.buttons[4]?.pressed ?? false;
+      const grip = rightPad.buttons[1]?.pressed ?? false;
+
+      // A — edge-trigger pan/tilt recenter.
+      if (a && !prevRA) setSetpoint(0, 0, 'vr-A');
+      prevRA = a;
+
+      // Deadman edge transitions:
+      //   pressed  → snap pan/tilt to center (forward) for driving;
+      //   released → reset head-pose origin so wherever the user is now
+      //              looking becomes the new neutral (no camera jump).
+      if (grip && !deadman) {
+        setSetpoint(0, 0, 'vr-drive');
+        origin = null;
+      }
+      if (!grip && deadman) {
+        origin = null;
+      }
+      deadman = grip;
+
+      // Thumbstick → twist, gated by deadman grip.
+      const sx = rightPad.axes[2] ?? 0;
+      const sy = rightPad.axes[3] ?? 0;
+      const ax = Math.abs(sx) >= STICK_DEADZONE ? sx : 0;
+      const ay = Math.abs(sy) >= STICK_DEADZONE ? sy : 0;
+
+      let linear = 0, angular = 0;
+      if (grip) {
+        // Stick up (negative axis) → forward. Apply asymmetric caps.
+        linear  = -ay * (ay < 0 ? MAX_LIN_FWD : MAX_LIN_REV);
+        // Stick right (positive axis) → turn right → negative yaw (ROS REP-103).
+        angular = -ax * MAX_ANG;
+        cmdVelDirty = true;
+      }
+
+      const now = performance.now();
+      if (now - lastCmdVelMs >= CMD_VEL_PERIOD_MS) {
+        if (grip) {
+          ros.publishCmdVel(linear, angular);
+          lastCmdVelMs = now;
+        } else if (cmdVelDirty) {
+          // Grip just released — publish one zero to ensure the controller's
+          // 500 ms watchdog doesn't keep the last commanded velocity.
+          ros.publishCmdVel(0, 0);
+          lastCmdVelMs = now;
+          cmdVelDirty = false;
+        }
+      }
     }
   }
 
@@ -369,9 +493,10 @@ async function enterVR() {
     const dt = lastT ? (t - lastT) / 1000 : 0;
     lastT = t;
 
-    // 1. Head pose → setpoint.
+    // 1. Head pose → setpoint, suppressed while the driving deadman is held
+    //    so the camera stays centered (facing forward) while moving.
     const pose = frame.getViewerPose(refSpace);
-    if (pose) {
+    if (pose && !deadman) {
       const { yaw, pitch } = quatToYawPitch(pose.transform.orientation);
       if (origin === null) origin = { yaw, pitch };
       // Negate yaw delta vs mouse/keyboard: WebXR head-right yields negative
@@ -431,6 +556,10 @@ function installMouseControls() {
     const dx = e.clientX - last.x;
     const dy = e.clientY - last.y;
     last = { x: e.clientX, y: e.clientY };
+    // While the deadman is held the user is driving — don't smear the camera
+    // around with mouse motion. Drag is queued via `last` updates so the
+    // next non-deadman drag picks up from the current cursor smoothly.
+    if (pcDeadman) return;
     // Direction is controlled by PAN_SIGN / TILT_SIGN at the top of this file
     // so a single sign flip applies to mouse, keyboard, and WebXR identically.
     // Browser dy convention: positive = mouse moved DOWN.
@@ -443,13 +572,17 @@ function installMouseControls() {
   vid.style.cursor = 'grab';
 }
 
-// ── 6. Keyboard — arrow keys / WASD ─────────────────────────────────────────
+// ── 6. Keyboard — arrow keys / WASD / Space deadman ─────────────────────────
 // Held key applies KEY_STEP_RAD repeatedly at KEY_REPEAT_HZ so it feels like
-// continuous motion rather than per-keystroke jumps. 'R' / Home recenters,
-// space publishes the current setpoint (useful for resync after drift).
-function installKeyboardControls() {
+// continuous motion rather than per-keystroke jumps. 'R' / Home recenters
+// pan/tilt. Space is a deadman: while held, WASD drives the car (Twist to
+// /cmd_vel at 10 Hz) and the camera is forced to centre; on release, pan/tilt
+// control resumes and a single zero Twist is published so the STM32 watchdog
+// stops the motors immediately.
+function installKeyboardControls(ros) {
   const held = new Set();
   const tick = 1000 / KEY_REPEAT_HZ;
+  let lastCmdVelMs = 0;
 
   // Skip only when typing in a real text field. BUTTONs grab focus after a
   // click, but we still want arrow keys / WASD to drive the camera — let
@@ -457,27 +590,63 @@ function installKeyboardControls() {
   const isTextField = (el) =>
     el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
 
+  function updateDeadman() {
+    const next = held.has(' ');
+    if (next && !pcDeadman) {
+      // Entering drive mode: snap camera centre so the user can see straight.
+      setSetpoint(0, 0, 'pc-drive');
+    }
+    if (!next && pcDeadman) {
+      // Leaving drive mode: zero cmd_vel so the watchdog stops the motors.
+      ros.publishCmdVel(0, 0);
+    }
+    pcDeadman = next;
+  }
+
   window.addEventListener('keydown', (e) => {
     if (isTextField(e.target)) return;
     const k = e.key.toLowerCase();
     if (['arrowup','arrowdown','arrowleft','arrowright','w','a','s','d','r','home',' '].includes(k)) {
       e.preventDefault();
-      // If a button is focused, push focus back to body so it doesn't keep
-      // soaking up Enter/Space and visually showing focus rings.
       if (document.activeElement && document.activeElement.tagName === 'BUTTON') {
         document.activeElement.blur();
       }
       held.add(k);
       if (k === 'r' || k === 'home') setSetpoint(0, 0, 'keyboard');
+      if (k === ' ') updateDeadman();
     }
   });
   window.addEventListener('keyup', (e) => {
-    held.delete(e.key.toLowerCase());
+    const k = e.key.toLowerCase();
+    held.delete(k);
+    if (k === ' ') updateDeadman();
   });
+  // Lose-focus safety: if the user alt-tabs away with Space held, we'd be
+  // stuck commanding velocity forever. Treat blur as "all keys released".
+  window.addEventListener('blur', () => {
+    held.clear();
+    updateDeadman();
+  });
+
   setInterval(() => {
+    if (pcDeadman) {
+      // Drive mode: arrow keys / WASD → Twist.
+      const fwd  = held.has('arrowup')    || held.has('w');
+      const rev  = held.has('arrowdown')  || held.has('s');
+      const left = held.has('arrowleft')  || held.has('a');
+      const right= held.has('arrowright') || held.has('d');
+      const linear  = (fwd ? MAX_LIN_FWD : 0) - (rev ? MAX_LIN_REV : 0);
+      const angular = (left ? MAX_ANG : 0)    - (right ? MAX_ANG : 0);
+      const now = performance.now();
+      if (now - lastCmdVelMs >= CMD_VEL_PERIOD_MS) {
+        ros.publishCmdVel(linear, angular);
+        lastCmdVelMs = now;
+      }
+      return;
+    }
     if (held.size === 0) return;
-    // Compute deltas in the user's frame (right/up positive), then apply the
-    // shared PAN_SIGN/TILT_SIGN at the boundary.
+    // Pan/tilt mode: deltas in the user's frame (right/up positive),
+    // signs applied at the boundary.
     let userPan = 0, userTilt = 0;
     if (held.has('arrowright') || held.has('d')) userPan  += KEY_STEP_RAD;
     if (held.has('arrowleft')  || held.has('a')) userPan  -= KEY_STEP_RAD;
@@ -502,13 +671,13 @@ function installCenterButton() {
   startPublisher(ros);
 
   installMouseControls();
-  installKeyboardControls();
+  installKeyboardControls(ros);
   installCenterButton();
 
   if ('xr' in navigator) {
     const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
     $('enterVR').disabled = !ok;
-    $('enterVR').onclick = () => enterVR();
+    $('enterVR').onclick = () => enterVR(ros);
   } else {
     $('enterVR').textContent = 'no WebXR';
   }
