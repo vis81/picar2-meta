@@ -3,3 +3,7 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{seria
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="PICAR2_LIDAR_0001", SYMLINK+="ldlidar"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="PICAR2_LD07_0001", SYMLINK+="ld07"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", SYMLINK+="sen0628"
+# DualShock 4 lightbar LEDs — let the input group write brightness so the
+# feedback node can drive them from inside the (non-root) container.
+SUBSYSTEM=="leds", KERNELS=="*054C:09CC*", ACTION=="add", \
+    RUN+="/bin/sh -c 'chgrp input /sys/%p/brightness; chmod 0664 /sys/%p/brightness'"

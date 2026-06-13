@@ -32,6 +32,7 @@ RUN apt-get update \
         ros-jazzy-teleop-twist-keyboard \
         ros-jazzy-joy \
         ros-jazzy-teleop-twist-joy \
+        python3-evdev \
  # point cloud processing (pcl_ros filter nodes for sen0628)
  && apt-get install -y \
         ros-jazzy-pcl-ros \
