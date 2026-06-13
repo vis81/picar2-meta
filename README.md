@@ -118,3 +118,114 @@ chronyc clients
 # Quick offset check from either side:
 chronyc tracking | grep "System time"
 ```
+
+## PS4 (DualShock 4) controller
+
+The robot supports a PS4 controller via `teleop_twist_joy` for manual driving.
+The R1 button is the deadman; right stick drives. Layout lives in
+`src/picar2-ros2/picar2_bringup/config/ps4.yaml`.
+
+Launch options:
+
+```bash
+make joystick                                  # standalone (ps4 layout default)
+make bringup USE_JOY=true                      # joystick along with the rest
+make bringup USE_JOY=true JOY_CONFIG=flysky    # use FlySky RC transmitter
+make bringup USE_JOY=true JOY_ID=1             # second joystick device
+```
+
+### USB
+
+Plug the controller into any USB port on the Pi. It enumerates as
+`/dev/input/js0` and is immediately usable — no pairing needed.
+
+### Bluetooth (one-time pairing)
+
+#### 1. Enable Bluetooth on the Pi (one-time)
+
+The default robot image disables on-board Bluetooth via
+`dtoverlay=disable-bt` so the GPIO UART is available. To use Bluetooth,
+swap that for `miniuart-bt` (BT on the slower mini-UART, GPIO UART
+preserved):
+
+```bash
+# Verify GPIO UART is unused
+sudo lsof /dev/serial0 /dev/ttyAMA0           # should return nothing
+
+# Swap the overlay
+sudo sed -i 's/^dtoverlay=disable-bt$/dtoverlay=miniuart-bt/' /boot/firmware/config.txt
+grep -n 'miniuart\|disable-bt' /boot/firmware/config.txt    # verify
+
+sudo reboot
+```
+
+After reboot, confirm BT is up:
+
+```bash
+systemctl status bluetooth      # active (running)
+hciconfig hci0                  # UP RUNNING
+```
+
+#### 2. Pair the controller
+
+Unplug any USB connection to the controller first (can't pair while
+tethered). Then:
+
+```bash
+sudo bluetoothctl
+```
+
+Inside the `bluetoothctl` prompt:
+
+```
+agent on
+default-agent
+scan on
+```
+
+On the controller, **hold Share + PS** for ~3 s until the lightbar
+flashes white rapidly. A line appears in `bluetoothctl`:
+
+```
+[NEW] Device A4:53:85:XX:XX:XX Wireless Controller
+```
+
+Copy the MAC and run (in the same session):
+
+```
+pair A4:53:85:XX:XX:XX
+trust A4:53:85:XX:XX:XX
+connect A4:53:85:XX:XX:XX
+scan off
+quit
+```
+
+`trust` is critical — without it the controller would need to be paired
+again after every disconnect.
+
+#### 3. Verify
+
+```bash
+ls /dev/input/js0               # exists when connected
+hciconfig hci0                  # ACL/sco RX bytes increasing
+```
+
+### Day-to-day use
+
+- **Connect**: press the PS button briefly. Lightbar flashes then goes
+  solid. `/dev/input/js0` appears within a second.
+- **Disconnect**: hold the PS button for 10 s, or
+  `bluetoothctl disconnect <MAC>`.
+- The Pi remembers the controller across reboots once trusted.
+- DualShock 4 only remembers **one host at a time** — re-pairing is
+  required if you connect it to your phone or another PC in between.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `bluetooth.service` is `inactive (dead)` | `dtoverlay=disable-bt` is still in `config.txt` — swap to `miniuart-bt` and reboot |
+| `hciconfig hci0` shows `DOWN` | `sudo hciconfig hci0 up` |
+| `Failed to pair (org.bluez.Error.AlreadyExists)` | In `bluetoothctl`: `remove <MAC>` first, then re-pair |
+| `/dev/input/js0` exists but `make joystick` says no /joy | Container missing `input` group access — see Makefile `--group-add input`; restart container with `make docker-stop && make docker-start` |
+| `Package 'teleop_twist_joy' not found` | `ros-jazzy-joy` + `ros-jazzy-teleop-twist-joy` aren't in the running image — run `make image` to bake them in, or `docker exec -u root picar2 apt-get install -y ros-jazzy-joy ros-jazzy-teleop-twist-joy` for a one-off |
