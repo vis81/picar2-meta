@@ -31,7 +31,10 @@ VIZANTI_ROSBRIDGE_PORT ?= 5001
 SEN0628_PORT ?= /dev/sen0628
 IMU_ARGS ?=
 LD07_PORT ?= /dev/ttyUSB0
-JOY_ID   ?= 0
+USE_JOY    ?= false
+JOY_ID     ?= 0
+# picar2_bringup/config/<name>.yaml — ps4 | flysky
+JOY_CONFIG ?= ps4
 
 # host: run commands directly (ROS must be installed and sourced on the host)
 # docker: wrap each command in an appropriate Docker container
@@ -72,8 +75,10 @@ ROS_SETUP_PC := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
 
 # ── docker-start flags ───────────────────────────────────────────────────────
 # gpio group name is not in the ROS base image — resolve its GID from
-# /dev/gpiomem on the host at make time.
-_GID_GPIO := $(shell stat -c '%g' /dev/gpiomem 2>/dev/null)
+# /dev/gpiomem on the host at make time. Same idea for the `input` group
+# (needed for /dev/input/event* under SDL2 in joy_node).
+_GID_GPIO  := $(shell stat -c '%g' /dev/gpiomem 2>/dev/null)
+_GID_INPUT := $(shell getent group input | awk -F: '{print $$3}')
 
 _DOCKER_FLAGS := --privileged --network host --ipc host \
                  -u $(shell id -u):$(shell id -g) \
@@ -81,6 +86,7 @@ _DOCKER_FLAGS := --privileged --network host --ipc host \
                  --group-add plugdev \
                  --group-add kmem \
                  $(if $(_GID_GPIO),--group-add $(_GID_GPIO)) \
+                 $(if $(_GID_INPUT),--group-add $(_GID_INPUT)) \
                  -e DISPLAY=$(DISPLAY) -e QT_XCB_NO_XI2=1 \
                  -v /tmp/.X11-unix:/tmp/.X11-unix \
                  -v /dev:/dev \
@@ -173,7 +179,7 @@ flash:
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT) use_vizanti:=$(USE_VIZANTI) vizanti_port:=$(VIZANTI_PORT) vizanti_rosbridge_port:=$(VIZANTI_ROSBRIDGE_PORT)"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT) use_vizanti:=$(USE_VIZANTI) vizanti_port:=$(VIZANTI_PORT) vizanti_rosbridge_port:=$(VIZANTI_ROSBRIDGE_PORT) use_joy:=$(USE_JOY) joy_dev:=$(JOY_ID) joy_config:=$(JOY_CONFIG)"
 
 sim:
 	$(XHOST)
@@ -205,8 +211,13 @@ explore-sim:
 teleop:
 	$(CMD) "$(ROS_SETUP) && ros2 run teleop_twist_keyboard teleop_twist_keyboard"
 
+# JOY_CONFIG picks the controller layout: ps4 (DualShock 4) or flysky (RC TX).
+# JOY_ID is the device index (usually 0 = /dev/input/js0). Override on the CLI:
+#   make joystick                       # PS4 on js0  (default)
+#   make joystick JOY_CONFIG=flysky     # FlySky RC
+#   make joystick JOY_ID=1              # second joystick device
 joystick:
-	$(CMD) "$(ROS_SETUP) && ros2 launch teleop_twist_joy teleop-launch.py joy_dev:=$(JOY_ID) config_filepath:=$(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config/flysky.yaml"
+	$(CMD) "$(ROS_SETUP) && ros2 launch teleop_twist_joy teleop-launch.py joy_dev:=$(JOY_ID) config_filepath:=$(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config/$(JOY_CONFIG).yaml"
 
 # Requires bringup running. Guides through 6-position accel calibration.
 # Output saved to src/picar2_bringup/config/imu_calib.yaml
