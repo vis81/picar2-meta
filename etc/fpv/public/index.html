@@ -33,10 +33,34 @@
     #hint kbd { background: #222; border: 1px solid #555;
                 padding: 1px 6px; border-radius: 3px;
                 font-family: ui-monospace, monospace; font-size: .75rem; }
+    /* FWD marker = upward arrow showing where the robot's chassis points
+       inside the current camera view. Centered on (50% + offset).
+       Transitions smooth out 30 Hz updates. */
+    #fwdMarker { position: fixed; top: 50%; left: 50%;
+                 transform: translate(-50%, -50%);
+                 pointer-events: none;
+                 transition: transform 80ms linear;
+                 filter: drop-shadow(0 0 4px rgba(0,0,0,.85)); }
+    #fwdMarker svg { display: block; width: 44px; height: 56px; }
+    #fwdMarker .body { fill: #4cf67a; }
+    /* When FWD marker is pinned to an edge (out of view), tint it red. */
+    #fwdMarker.offscreen .body { fill: #ff6262; }
   </style>
 </head>
 <body>
   <video id="cam" autoplay playsinline muted></video>
+  <div id="fwdMarker" aria-hidden="true">
+    <!-- Upward-pointing arrow: tip triangle + shaft rectangle as one path. -->
+    <svg viewBox="-22 -28 44 56">
+      <path class="body" d="M 0 -25
+                            L 14 -3
+                            L 6 -3
+                            L 6 24
+                            L -6 24
+                            L -6 -3
+                            L -14 -3 Z"/>
+    </svg>
+  </div>
   <div id="hud">
     <div class="row"><span class="label">stream</span><span id="status" class="value">…</span></div>
     <div class="row"><span class="label">rosbridge</span><span id="rosStatus" class="value">…</span></div>

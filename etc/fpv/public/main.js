@@ -54,6 +54,19 @@ const KEY_REPEAT_HZ     = 30;        // when key held, apply step at this rate
 // gives a "monitor across the room" feel; above ~0.9 feels claustrophobic.
 // In VR, right thumbstick Y adjusts this live within [VIDEO_SCALE_MIN, MAX].
 const VIDEO_SCALE       = 0.6;
+
+// IMX500 estimated FOV at 1280×720 — tune by trial. Used to map pan/tilt
+// angles to screen offsets for the "FWD" overlay marker. The video has
+// object-fit: cover, so percent-of-viewport is a close-enough approximation.
+const CAM_HFOV_RAD      = 1.15;      // ≈66° horizontal
+const CAM_VFOV_RAD      = 0.65;      // ≈37° vertical
+
+// Resting Y position of the FWD ring inside the video panel: 0 = centre,
+// -1 = bottom edge, +1 = top edge. Pan/tilt deltas are added on top, so
+// looking down lifts the ring toward the centre and looking up pushes it
+// below the view (where it pins to the bottom and turns red).
+const FWD_Y_ANCHOR_VR   = -0.6;
+const FWD_Y_ANCHOR_DOM  =  0.6;      // DOM Y is inverted (positive = down)
 const VIDEO_SCALE_MIN   = 0.2;
 const VIDEO_SCALE_MAX   = 1.0;
 const VIDEO_SCALE_RATE  = 0.5;       // clip-space units per second at full stick
@@ -249,6 +262,7 @@ function startPublisher(ros) {
   let publishesThisSecond = 0;
   let rateWindowStart = performance.now();
   let lastPublished = { pan: NaN, tilt: NaN };
+  const fwdMarker = $('fwdMarker');
 
   setInterval(() => {
     const now = performance.now();
@@ -266,6 +280,21 @@ function startPublisher(ros) {
       $('rateVal').textContent = `${publishesThisSecond} Hz (${state.source})`;
       publishesThisSecond = 0;
       rateWindowStart = now;
+    }
+
+    // FWD overlay: where the robot's chassis is pointing in the current
+    // camera view. The ring is anchored toward the bottom of the panel
+    // (FWD_Y_ANCHOR_DOM) and drifts upward as the camera tilts down,
+    // mirroring the chassis-forward direction.
+    if (fwdMarker) {
+      const xFrac = state.pan  / (CAM_HFOV_RAD / 2);
+      const yFrac = -state.tilt / (CAM_VFOV_RAD / 2);
+      const cx = Math.max(-1, Math.min(1, xFrac));
+      const cy = Math.max(-1, Math.min(1, yFrac + FWD_Y_ANCHOR_DOM));
+      const off = Math.abs(xFrac) > 1 || Math.abs(yFrac + FWD_Y_ANCHOR_DOM) > 1;
+      fwdMarker.style.transform =
+        `translate(calc(-50% + ${cx * 48}vw), calc(-50% + ${cy * 48}vh))`;
+      fwdMarker.classList.toggle('offscreen', off);
     }
   }, PUBLISH_PERIOD_MS);
 }
@@ -369,6 +398,83 @@ function makeVideoRenderer(gl, videoEl) {
   };
 }
 
+// WebGL overlay: an upward-pointing FWD arrow showing where the robot's
+// chassis is pointing inside the camera view. Lives in panel-normalised
+// clip space so it scales with the video quad.
+function makeOverlayRenderer(gl) {
+  const vsSrc = `
+    attribute vec2 a_pos;
+    uniform vec2 u_offset;
+    uniform float u_scale;
+    void main() {
+      gl_Position = vec4((a_pos + u_offset) * u_scale, 0.0, 1.0);
+    }`;
+  const fsSrc = `
+    precision mediump float;
+    uniform vec4 u_color;
+    void main() { gl_FragColor = u_color; }`;
+
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      throw new Error('overlay shader: ' + gl.getShaderInfoLog(s));
+    }
+    return s;
+  };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error('overlay link: ' + gl.getProgramInfoLog(prog));
+  }
+  const posLoc    = gl.getAttribLocation(prog, 'a_pos');
+  const offsetLoc = gl.getUniformLocation(prog, 'u_offset');
+  const scaleLoc  = gl.getUniformLocation(prog, 'u_scale');
+  const colorLoc  = gl.getUniformLocation(prog, 'u_color');
+
+  // FWD arrow shape: a chevron-tipped arrow pointing UP (= robot forward).
+  // Built from a tip triangle plus a rectangular shaft, both centred on (0,0).
+  // WebGL clip space has +Y up, so the tip vertex is at positive Y.
+  const TIP_Y   = 0.075;
+  const TIP_X   = 0.055;
+  const BASE_Y  = 0.005;
+  const SHAFT_W = 0.025;
+  const SHAFT_BOT = -0.08;
+  const arrowVerts = new Float32Array([
+    // tip triangle (CCW)
+    -TIP_X, BASE_Y,    TIP_X, BASE_Y,    0, TIP_Y,
+    // shaft, two triangles forming a rectangle from SHAFT_BOT to BASE_Y
+    -SHAFT_W, SHAFT_BOT,   SHAFT_W, SHAFT_BOT,  -SHAFT_W, BASE_Y,
+    -SHAFT_W, BASE_Y,      SHAFT_W, SHAFT_BOT,   SHAFT_W, BASE_Y,
+  ]);
+  const arrowVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, arrowVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, arrowVerts, gl.STATIC_DRAW);
+  const arrowCount = arrowVerts.length / 2;
+
+  return function drawOverlay(viewport, panelScale, fwdX, fwdY, offscreen) {
+    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+    gl.useProgram(prog);
+    gl.uniform1f(scaleLoc, panelScale);
+    gl.enableVertexAttribArray(posLoc);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    // FWD arrow — green normally, red when chassis direction is off-panel.
+    gl.bindBuffer(gl.ARRAY_BUFFER, arrowVbo);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(offsetLoc, fwdX, fwdY);
+    if (offscreen) gl.uniform4f(colorLoc, 1, 0.38, 0.38, 0.92);
+    else           gl.uniform4f(colorLoc, 0.30, 0.97, 0.48, 0.92);
+    gl.drawArrays(gl.TRIANGLES, 0, arrowCount);
+
+    gl.disable(gl.BLEND);
+  };
+}
+
 async function enterVR(ros) {
   if (!('xr' in navigator)) {
     setStatus('status', 'no WebXR', 'err'); return;
@@ -386,6 +492,7 @@ async function enterVR(ros) {
   const refSpace = await session.requestReferenceSpace('local');
 
   const drawEye = makeVideoRenderer(gl, $('cam'));
+  const drawOverlay = makeOverlayRenderer(gl);
 
   // Controller bindings:
   //   LEFT  thumbstick Y  → live video panel scale (zoom-in/out)
@@ -444,17 +551,9 @@ async function enterVR(ros) {
       if (a && !prevRA) setSetpoint(0, 0, 'vr-A');
       prevRA = a;
 
-      // Deadman edge transitions:
-      //   pressed  → snap pan/tilt to center (forward) for driving;
-      //   released → reset head-pose origin so wherever the user is now
-      //              looking becomes the new neutral (no camera jump).
-      if (grip && !deadman) {
-        setSetpoint(0, 0, 'vr-drive');
-        origin = null;
-      }
-      if (!grip && deadman) {
-        origin = null;
-      }
+      // Deadman is now informational only — head tracking stays on while
+      // driving so the user can look around. The FWD overlay marker tells
+      // them where chassis-forward is in the moving view.
       deadman = grip;
 
       // Thumbstick → twist, gated by deadman grip.
@@ -493,10 +592,11 @@ async function enterVR(ros) {
     const dt = lastT ? (t - lastT) / 1000 : 0;
     lastT = t;
 
-    // 1. Head pose → setpoint, suppressed while the driving deadman is held
-    //    so the camera stays centered (facing forward) while moving.
+    // 1. Head pose → setpoint. Head tracking continues during driving so
+    //    the user can look around naturally; the FWD overlay marker shows
+    //    where chassis-forward sits in the current camera view.
     const pose = frame.getViewerPose(refSpace);
-    if (pose && !deadman) {
+    if (pose) {
       const { yaw, pitch } = quatToYawPitch(pose.transform.orientation);
       if (origin === null) origin = { yaw, pitch };
       // Negate yaw delta vs mouse/keyboard: WebXR head-right yields negative
@@ -512,14 +612,26 @@ async function enterVR(ros) {
     // 2. Controller poll for scale.
     if (dt > 0) pollControllers(dt);
 
-    // 3. Render the video to both eyes (mono — same image both sides).
+    // 3. Render the video + overlay to both eyes (mono — same image both sides).
     const baseLayer = session.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (pose) {
+      // FWD marker position in panel-normalised coords (-1..+1 = panel bounds).
+      // WebGL clip space is +Y up, opposite of DOM, so the tilt sign here is
+      // positive while the DOM overlay (publisher loop) negates it.
+      // FWD_Y_ANCHOR_VR shifts the ring's resting position toward the bottom.
+      const xFrac = state.pan  / (CAM_HFOV_RAD / 2);
+      const yFrac = state.tilt / (CAM_VFOV_RAD / 2);
+      const fwdX = Math.max(-1, Math.min(1, xFrac));
+      const fwdY = Math.max(-1, Math.min(1, yFrac + FWD_Y_ANCHOR_VR));
+      const offscreen = Math.abs(xFrac) > 1 ||
+                        Math.abs(yFrac + FWD_Y_ANCHOR_VR) > 1;
       for (const view of pose.views) {
-        drawEye(baseLayer.getViewport(view), scale);
+        const viewport = baseLayer.getViewport(view);
+        drawEye(viewport, scale);
+        drawOverlay(viewport, scale, fwdX, fwdY, offscreen);
       }
     }
     session.requestAnimationFrame(loop);
