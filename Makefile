@@ -100,7 +100,7 @@ endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
-        docker-start docker-stop sync2pi softap softap-down install-uarts clean
+        docker-start docker-stop sync2pi softap softap-down install-uarts fpv-setup fpv fpv-stop clean
 
 all: build
 
@@ -312,3 +312,25 @@ install-uarts:
 	sudo systemctl daemon-reload
 	sudo systemctl enable --now zephyr-shell
 	@echo "Done — unplug and replug USB adapters, then connect via: putty -raw <pi-ip> 4444"
+
+# ── FPV (Meta Quest 3) — MediaMTX on host (not docker) + WebXR client ────────
+# fpv-setup: one-time installer (libcamera-apps, MediaMTX, TLS cert, systemd unit).
+# fpv:       starts the mediamtx service; ROS bringup must be up separately for
+#            pan/tilt to actually move (rosbridge inside the picar2 container).
+# fpv-stop:  stops the mediamtx service.
+#
+# Open https://<pi-ip>:8889/  on Quest 3 → accept self-signed cert →
+#   click "Enter VR" → head pose drives /pan_tilt_controller/commands.
+fpv-setup:
+	sudo WS_DIR=$(WS) bash $(WS)/etc/fpv/install-mediamtx.sh
+
+fpv:
+	sudo systemctl start mediamtx picar-fpv-ui
+	@ip="$$(hostname -I | awk '{print $$1}')"; \
+	 echo ""; \
+	 echo "  Quest WebXR client:    https://$$ip:8443/"; \
+	 echo "  Camera stream (test):  https://$$ip:8889/cam/"; \
+	 echo ""
+
+fpv-stop:
+	sudo systemctl stop mediamtx picar-fpv-ui

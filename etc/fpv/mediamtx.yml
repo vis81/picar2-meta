@@ -1,0 +1,56 @@
+# MediaMTX config for picar2 FPV: Quest 3 receives a low-latency WebRTC video
+# stream from the on-host libcamera (no docker), and serves the static Quest
+# web UI from the same origin so WebXR + WHEP share one TLS cert.
+#
+# Edit live and `sudo systemctl reload mediamtx` (SIGHUP) to apply.
+
+logLevel: info
+logDestinations: [stdout]
+
+# Disable everything except WebRTC + the embedded HTTP server. Smaller surface
+# area, less to lock down.
+# RTSP is enabled but bound to localhost only so the rpicam-vid → ffmpeg
+# pipeline can publish into MediaMTX without exposing RTSP to the LAN.
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+rtmp: no
+hls: no
+srt: no
+
+# ── WebRTC / WHEP ────────────────────────────────────────────────────────────
+# WHEP endpoint at /<path>/whep; built-in viewer at /<path>/.
+webrtc: yes
+webrtcAddress: :8889
+webrtcEncryption: yes
+webrtcServerCert: /etc/mediamtx/fpv.crt
+webrtcServerKey:  /etc/mediamtx/fpv.key
+
+# LAN-only. Skip STUN/TURN to avoid 100–500 ms ICE gathering delay.
+webrtcICEServers2: []
+webrtcLocalUDPAddress: :8189
+webrtcIPsFromInterfaces: yes
+# Bind directly to listed interfaces if discovery is flaky:
+# webrtcAdditionalHosts: [192.168.1.50]
+# The Quest WebXR client is served from a different port (8443), so the
+# WHEP POST is cross-origin. Permit it.
+webrtcAllowOrigin: '*'
+
+# ── Camera path ──────────────────────────────────────────────────────────────
+# MediaMTX's built-in rpiCamera source ships libcamera 0.3.0, which predates
+# IMX500 sensor support — it warns "No static properties available for 'imx500'"
+# and fails. We use the system's rpicam-vid (libcamera 0.5+) instead, piped
+# through ffmpeg, publishing to MediaMTX over local-loopback RTSP. MediaMTX
+# re-exposes the stream over WebRTC.
+paths:
+  cam:
+    source: publisher
+    # `runOnInit` spawns the pipeline as soon as MediaMTX starts; `--inline`
+    # forces an SPS/PPS at every keyframe (browsers need this to start
+    # decoding mid-stream); profile baseline + level 4.0 + small IDR period =
+    # zero B-frames, fast packet-loss recovery.
+    # rpicam-vid's piped H.264 doesn't survive ffmpeg's codec probing; running
+    # rpicam-vid as a TCP server and having ffmpeg connect makes the SPS/PPS
+    # discovery work reliably. See etc/fpv/camera-pipeline.sh for the lifecycle
+    # management (orderly child cleanup, TCP-ready polling, restart-on-failure).
+    runOnInit: /home/pi/picar_ws/etc/fpv/camera-pipeline.sh
+    runOnInitRestart: yes

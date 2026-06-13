@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>picar FPV</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #000; color: #eee;
+                 font-family: ui-sans-serif, system-ui, sans-serif;
+                 overflow: hidden; height: 100%; }
+    #cam { position: fixed; inset: 0; width: 100vw; height: 100vh;
+           object-fit: cover; background: #000; }
+    #hud { position: fixed; top: 1rem; left: 1rem; right: 1rem;
+           display: flex; gap: 1rem; align-items: center;
+           background: rgba(0,0,0,.55); padding: .6rem .9rem;
+           border-radius: .5rem; backdrop-filter: blur(4px);
+           font-size: .9rem; line-height: 1.3; }
+    #hud .row { display: flex; flex-direction: column; }
+    #hud .label { font-size: .65rem; opacity: .6;
+                  text-transform: uppercase; letter-spacing: .05em; }
+    #hud .value { font-variant-numeric: tabular-nums; }
+    .btn { padding: .5rem 1rem; border: none; color: #fff;
+           border-radius: .35rem; cursor: pointer; font-size: 1rem; }
+    #enterVR { margin-left: auto; background: #2a6df4; }
+    #center  { background: #555; }
+    .btn:disabled { background: #444; cursor: not-allowed; }
+    #status.err { color: #f88; }
+    #status.ok  { color: #8f8; }
+    #hint { position: fixed; bottom: 1rem; left: 1rem;
+            background: rgba(0,0,0,.55); padding: .5rem .8rem;
+            border-radius: .5rem; backdrop-filter: blur(4px);
+            font-size: .8rem; opacity: .85; }
+    #hint kbd { background: #222; border: 1px solid #555;
+                padding: 1px 6px; border-radius: 3px;
+                font-family: ui-monospace, monospace; font-size: .75rem; }
+  </style>
+</head>
+<body>
+  <video id="cam" autoplay playsinline muted></video>
+  <div id="hud">
+    <div class="row"><span class="label">stream</span><span id="status" class="value">…</span></div>
+    <div class="row"><span class="label">rosbridge</span><span id="rosStatus" class="value">…</span></div>
+    <div class="row"><span class="label">pan / tilt</span><span id="ptVal" class="value">0.00 / 0.00</span></div>
+    <div class="row"><span class="label">rate</span><span id="rateVal" class="value">0 Hz</span></div>
+    <button id="center"  class="btn">Center</button>
+    <button id="enterVR" class="btn" disabled>Enter VR</button>
+  </div>
+  <div id="hint">
+    drag video to look · <kbd>WASD</kbd>/<kbd>↑↓←→</kbd> to nudge · <kbd>R</kbd> recenters
+  </div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
