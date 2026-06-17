@@ -106,7 +106,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer nav nav-sim explore explore-sim teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap softap-down install-uarts fpv-setup fpv fpv-stop clean
 
@@ -217,6 +217,32 @@ save-map:
 
 cartographer:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup cartographer.launch.py"
+
+# Save cartographer state. Produces:
+#   maps/$(MAP).pbstream            — cartographer's native serialization
+#   maps/$(MAP).pgm + $(MAP).yaml   — Nav2 map_server occupancy grid
+# finish_trajectory(0) seals the active trajectory so write_state writes a
+# clean state. Trajectory id 0 is the first trajectory (fresh `make
+# cartographer`); use a higher id if you've called start_trajectory yourself.
+save-cartographer-map:
+	$(CMD) "$(ROS_SETUP) && mkdir -p $(WS_PATH)/maps && \
+	  ros2 service call /finish_trajectory cartographer_ros_msgs/srv/FinishTrajectory \"{trajectory_id: 0}\" && \
+	  ros2 service call /write_state cartographer_ros_msgs/srv/WriteState \"{filename: '$(WS_PATH)/maps/$(MAP).pbstream', include_unfinished_submaps: false}\" && \
+	  ros2 run nav2_map_server map_saver_cli -f $(WS_PATH)/maps/$(MAP) --ros-args -p map_subscribe_transient_local:=true"
+
+# Resume cartographer from a saved pbstream (keeps mapping on top).
+cartographer-resume:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup cartographer.launch.py load_state:=$(WS_PATH)/maps/$(MAP).pbstream"
+
+# Localize on a saved pbstream without adding to it (pure localization).
+cartographer-localize:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup cartographer.launch.py load_state:=$(WS_PATH)/maps/$(MAP).pbstream load_frozen:=true"
+
+# AMCL localization on a saved PGM/YAML. Backend-agnostic — works on
+# maps produced by either save-map (slam_toolbox) or save-cartographer-map.
+# After launch, set initial pose via RViz "2D Pose Estimate".
+amcl:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup amcl.launch.py map_yaml:=$(WS_PATH)/maps/$(MAP).yaml"
 
 nav:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py"
