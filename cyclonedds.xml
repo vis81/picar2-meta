@@ -1,4 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <CycloneDDS>
-  <Domain>
+  <Domain id="any">
+    <Discovery>
+      <!-- Default MaxAutoParticipantIndex is 32; bringup + slam + nav + vizanti
+           + joy + camera-driving nodes easily exceed that on a single host
+           and bt_navigator throws "failed to find a free participant index".
+           Bumping to 120 (the practical RTPS port-range ceiling). -->
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>120</MaxAutoParticipantIndex>
+    </Discovery>
   </Domain>
 </CycloneDDS>
