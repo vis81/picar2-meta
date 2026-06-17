@@ -13,6 +13,8 @@ PC_IFACE ?=
 FOCUS    ?= imu
 FORCE    ?=
 LIDAR    ?= ld19   # ld19 | lds02rr | none
+# base name (no extension) under maps/ for save-map / slam-resume
+MAP      ?= home
 # Available worlds (from src/robotnik_gazebo_worlds/):
 #   room | electrical_substation | opil_factory | rubber_factory | warehouse |
 #   photovoltaic_station | robotnik_lab | robotnik_lab_simplifyed
@@ -104,7 +106,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim cartographer nav nav-sim explore explore-sim teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap softap-down install-uarts fpv-setup fpv fpv-stop clean
 
@@ -192,6 +194,26 @@ slam:
 
 slam-sim:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup slam.launch.py use_sim_time:=true"
+
+# Resume from a previously-saved pose graph. Robot is assumed to be at the
+# same physical pose where save-map ran (map_start_at_dock=true).
+slam-resume:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup slam.launch.py map_file:=$(WS_PATH)/maps/$(MAP)"
+
+# Load a saved map and run slam_toolbox in localization mode — the map is
+# frozen, the robot tracks against it. After launch, set the initial pose
+# in RViz with the '2D Pose Estimate' tool (publishes to /initialpose).
+# Uses localization_slam_toolbox_node because async_slam_toolbox_node does
+# NOT subscribe to /initialpose, regardless of the `mode` parameter.
+slam-localize:
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup slam.launch.py map_file:=$(WS_PATH)/maps/$(MAP) mode:=localization executable:=localization_slam_toolbox_node"
+
+# Save both the slam_toolbox pose graph (.posegraph + .data — for resume)
+# and a PGM/YAML occupancy grid (for Nav2 map_server). MAP=<name>, default 'home'.
+save-map:
+	$(CMD) "$(ROS_SETUP) && mkdir -p $(WS_PATH)/maps && \
+	  ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph \"{filename: '$(WS_PATH)/maps/$(MAP)'}\" && \
+	  ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap \"{name: {data: '$(WS_PATH)/maps/$(MAP)'}}\""
 
 cartographer:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup cartographer.launch.py"
