@@ -1,172 +1,290 @@
-# PICAR-2 ROS2 Workspace
+# PICAR-2 Workspace
 
-## Overview
+Meta-repo for the PICAR-2 robot: an Ackermann-steered car with a Raspberry Pi 4
+(ROS 2 Jazzy) on top and a Yahboom STM32F103 board (Zephyr firmware) driving the
+motors, servos and IMU. Bringup runs on the Pi; RViz / calibration / Gazebo run
+on a PC. Both sides usually run in Docker on the same LAN over Cyclone DDS.
 
-ROS2 Jazzy colcon workspace. Four packages in `src/`. Build runs inside Docker
-(`picar2-ros2:jazzy`). The robot runs bringup on a Raspberry Pi 4; RViz / odom-cal
-run on a PC — both in Docker containers on the same LAN via Cyclone DDS.
+`README.md` covers first-time setup (vcs import, chrony time sync, PS4 pairing,
+Bluetooth troubleshooting). This file is the map of the code.
+
+## Layout
+
+The repo root holds only build infrastructure. All source lives in `src/`, which
+is **not committed** — it is populated by `make deps` (`vcs import < .repos`).
+
+```
+picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, scripts, etc/)
+  src/
+    picar2-ros2/              ← first-party ROS packages (own git repo)
+      picar2_bringup/         ← launch files, configs, calibration tools
+      picar2_control/         ← ros2_control SystemInterface for the STM32
+      picar2_description/     ← URDF + meshes
+    yahboom/                  ← Zephyr firmware (own git; COLCON_IGNORE'd by make deps)
+    lds02rr_lidar/            ← LDS02RR (Neato XV-11) driver
+    ldrobot_ld07/             ← LD07 structured-light depth sensor driver
+    ldrobot-lidar-ros2/       ← LD19 lidar (external)
+    tof_imager_ros/           ← SEN0628 matrix ToF driver
+    vizanti/                  ← web mission planner (external, forked)
+    explore_lite/             ← frontier exploration (external)
+    imu_calib/                ← accel/gyro calibration (external)
+    robotnik_gazebo_worlds/   ← sim worlds (external)
+  maps/                       ← saved maps (pbstream / posegraph / pgm+yaml)
+```
+
+Each `src/*` entry is an independent git repo. `make status` / `make pull` /
+`make push` operate on the meta-repo **and** all sub-repos (push only touches
+`vis81`-owned remotes). Firmware work is documented separately in
+`src/yahboom/CLAUDE.md` — read that before touching Zephyr code.
 
 ## Build & Run
 
+Every target runs either directly on the host or inside Docker, selected by
+`EXEC_ENV`:
+
 ```bash
-# From ros2/
-make build          # colcon build --symlink-install inside Docker
-make bringup        # Pi: launch full robot stack (privileged, /dev access)
-make rviz PI_IP=... PC_IFACE=...   # PC: RViz2
-make odom-cal PI_IP=... PC_IFACE=... # PC: odometry calibration GUI
-make slam           # attach to running picar2 container
-make teleop         # keyboard teleop in running picar2 container
-make shell          # interactive bash in picar2 container
-make sync2pi        # rsync to pi@rpi4.local:~/picar_ws/ros2/
-make clean          # rm build/ install/ log/
-make image          # rebuild Docker image
+make deps                     # vcs import into src/
+make build                    # colcon build --symlink-install
+make image                    # build picar2-ros2:jazzy locally
+make docker-start             # persistent 'picar2' container (privileged, host net/ipc, /dev)
+EXEC_ENV=docker make bringup  # any target, but inside that container
+make docker-stop
 ```
 
-Docker image: `picar2-ros2:jazzy`
-- aarch64 (Pi): base `ros:jazzy-ros-base`
-- amd64 (PC):  base `osrf/ros:jazzy-desktop`
+- `EXEC_ENV=host` (default) → `bash -c`, build dirs `build/` + `install/`
+- `EXEC_ENV=docker` → `docker exec -it picar2 …`, build dirs `build-docker/` + `install-docker/`
 
-DDS: Cyclone DDS (`rmw_cyclonedds_cpp`).
-- Pi bringup uses `cyclonedds.xml`
-- PC tools use `cyclonedds-pc.xml` and need `PI_IP=<pi-ip> PC_IFACE=<iface>` env vars
+Both trees coexist; never mix them (a host-built `install/` won't run in the
+container and vice versa).
 
-## Packages
+**The Pi runs the stack in Docker**, despite `EXEC_ENV` defaulting to `host` —
+so on the robot the workspace is `/ws`, the install tree is `install-docker/`,
+and anything launched from systemd has to go through `docker run`, not a
+sourced host ROS.
 
-### `picar2_bringup` (ament_cmake)
-Launch files, controller config, calibration tools.
+Image base is arch-dependent: `ros:jazzy-ros-base` on aarch64 (Pi),
+`osrf/ros:jazzy-desktop` on amd64 (PC). Gazebo and GUI extras are installed on
+amd64 only. `make image-pi` cross-builds the arm64 image via QEMU/buildx,
+`make image-push` ships it to the Pi over ssh.
 
-Key files:
-- `launch/picar2.launch.py` — main bringup (see Nodes section)
-- `launch/slam.launch.py` — slam_toolbox + nav2_lifecycle_manager
-- `config/controllers.yaml` — AckermannSteeringController params
-- `config/ekf.yaml` — robot_localization EKF config
-- `config/rviz.rviz` — saved RViz layout (**never hand-edit**: use Save in RViz)
-- `picar2_bringup/cmd_vel_relay.py` — Twist → TwistStamped relay
-- `picar2_bringup/odom_cal.py` — tkinter GUI for straight-line + circle calibration
+### Robot targets (Pi)
 
-### `picar2_control` (ament_cmake)
-`ros2_control` SystemInterface plugin for the STM32F103 board.
+| Target | What it does |
+|---|---|
+| `make bringup` | Full stack — see Nodes below. Knobs: `LIDAR` (`ld19`\|`lds02rr`\|`none`), `USE_MAG`, `USE_SEN0628`, `USE_FOXGLOVE`, `USE_VIZANTI`, `USE_JOY`, `JOY_CONFIG` |
+| `make cartographer` | Cartographer SLAM (**preferred**) |
+| `make save-cartographer-map MAP=home` | `finish_trajectory` + `write_state` → `maps/home.pbstream`, plus a PGM/YAML via `map_saver_cli` |
+| `make cartographer-resume MAP=home` | Resume mapping on a saved pbstream |
+| `make cartographer-localize MAP=home` | Pure localization on a frozen pbstream |
+| `make slam` / `slam-resume` / `slam-localize` / `save-map` | slam_toolbox equivalents |
+| `make amcl MAP=home` | map_server + AMCL on a PGM/YAML — backend-agnostic |
+| `make nav` | Nav2 (assumes bringup + a map source are already up) |
+| `make explore` | explore_lite frontier exploration |
+| `make teleop` / `make joystick` | keyboard / gamepad teleop |
+| `make diag`, `make debug FOCUS=imu\|nav\|tf\|all` | snapshot + rosbag capture into `bags/` |
+| `make firmware` / `make flash` | Zephyr build/flash via `src/yahboom/activate.sh` |
+| `make install-uarts` | udev symlinks + socat TCP bridge to the Zephyr shell (port 4444) |
+| `make fpv-setup` / `fpv` / `fpv-stop` | MediaMTX + WebXR FPV for Meta Quest 3 (host systemd, not Docker) |
+| `make softap SSID=… PASS=…` | concurrent AP+STA on the Pi's wlan0 |
 
-Key files:
-- `src/picar2_hardware.cpp` — all logic: serial framing, joint I/O, IMU publish, timesync
-- `include/picar2_control/picar2_hardware.hpp`
-- `picar2_control.xml` — pluginlib descriptor
+### PC targets
 
-### `picar2_description` (ament_cmake)
-URDF + meshes.
+`make rviz`, `make rqt`, `make odom-cal`, `make mag-calib`, `make lidar-ld07-view`,
+`make sen0628-view` — all use `cyclonedds-pc.xml` and **require `PI_IP` and
+`PC_IFACE`**; Cyclone DDS fails silently when they are empty:
 
-Key files:
-- `urdf/picar2.urdf.xacro` — robot description + `<ros2_control>` block with hardware params
+```bash
+make rviz PI_IP=192.168.0.42 PC_IFACE=enp3s0
+```
 
-### `picar2_lidar` (ament_python)
-Driver for LDS02RR (Neato XV-11) LiDAR.
-- Entry point: `picar2_lidar.lidar_node:main`
-- `launch/lidar.launch.py`
+### Simulation (PC)
 
-## Nodes Launched (picar2.launch.py)
+`make sim WORLD=room` launches Gazebo with `gz_ros2_control` instead of the real
+hardware plugin (`use_sim:=true` in the xacro). `scripts/patch_gz_world.py`
+injects missing system plugins into third-party world files and prints a patched
+copy under `/tmp`. Companion targets: `slam-sim`, `nav-sim`, `explore-sim`.
+
+## Nodes launched by `picar2.launch.py`
 
 | Node | Package | Role |
-|------|---------|------|
-| controller_manager | ros2_control | loads Picar2Hardware, 50 Hz loop |
-| robot_state_publisher | — | TF from URDF + /joint_states |
-| joint_state_broadcaster | — | /joint_states from hw interfaces |
-| ackermann_steering_controller | — | Ackermann kinematics → steer + wheel cmds |
-| cmd_vel_relay | picar2_bringup | /cmd_vel (Twist) → controller reference (TwistStamped) |
-| apply_calib_node | imu_calib | /imu/data_raw → /imu/data_corrected (accel scale+bias) |
-| imu_filter_madgwick | imu_filter_madgwick | /imu/data_corrected → /imu/data (no mag, ENU) |
-| ekf_node | robot_localization | odom + IMU → /odom + TF odom→base_footprint |
-| lidar_node | picar2_lidar | LiDAR driver (target_rpm=300, angle_offset=-2.8 rad) |
+|---|---|---|
+| `ros2_control_node` | controller_manager | loads `Picar2Hardware`, 50 Hz loop |
+| `robot_state_publisher` | — | TF from URDF; `publish_frequency` capped at 20 Hz |
+| `joint_state_broadcaster` | — | `/joint_states` |
+| `ackermann_steering_controller` | — | Ackermann kinematics + wheel odometry |
+| `pan_tilt_controller` | forward_command_controller | camera pan/tilt servos |
+| `cmd_vel_relay` | picar2_bringup | `/cmd_vel` (Twist) → controller reference (TwistStamped), clamps angular + reverse |
+| `apply_calib_node` | imu_calib | `/imu/data_raw` → `/imu/data_corrected` (bias/scale, gyro auto-calib on start) |
+| `mag_bias_observer` + `magnetometer_bias_remover` | magnetometer_pipeline | `/imu/mag` → `/imu/mag_unbiased` (only when `use_mag:=true`) |
+| `imu_filter_madgwick` | imu_filter_madgwick | → `/imu/data`, ENU, `publish_tf:=false` |
+| `ekf_node` | robot_localization | wheel odom + IMU yaw rate → `/odom` + `odom→base_footprint` TF |
+| lidar | lds02rr_lidar **or** ldlidar_component (LD19, lifecycle + composable container + lifecycle_manager) | `/lidar_node/scan` |
+| `tof_imager` | tof_imager_ros | SEN0628 front ToF → `/sen0628/pointcloud` (lifecycle, auto-configured/activated in the launch file) |
+| `ldrobot_ld07_node` | ldrobot_ld07 | legacy front depth sensor, superseded by SEN0628 |
+| `foxglove_bridge` | foxglove_bridge | `ws://<pi>:8765` |
+| Vizanti stack + `waypoints_to_simple_goals` | vizanti_* | web UI on `:5000`; the bridge turns Vizanti's `/waypoints` PoseArray into one `/goal_pose` at a time |
+| `joy_node` + `teleop_twist_joy` + `joy_feedback` | — | gamepad; `joy_feedback.py` drives DS4 rumble/lightbar over evdev |
 
-Launch args: `port` (default `/dev/ttyYahboom0`), `baud` (460800), `lidar` (true), `calib_file` (picar2_bringup/config/imu_calib.yaml).
+Launch args: `port` (`/dev/ttyYahboom0`), `baud` (460800), `lidar` (`lds02rr`),
+`use_mag` (false), `use_sen0628` (true), `sen0628_port`, `use_foxglove`,
+`use_vizanti`, `use_joy`, `joy_dev`, `joy_config`, `calib_file`.
 
-## Hardware Interface (Picar2Hardware)
+Note the Makefile's defaults differ from the launch file's in places — e.g.
+`LIDAR ?= ld19` and `USE_MAG ?= true`. The Makefile wins for `make bringup`.
 
-### URDF Hardware Params (`picar2.urdf.xacro` → `<hardware>` block)
+## Hardware interface (`picar2_control`)
+
+Single file: `src/picar2-ros2/picar2_control/src/picar2_hardware.cpp`.
+
+### Params (URDF `<hardware>` block)
 
 | Param | Default | Meaning |
-|-------|---------|---------|
-| `port` | `/dev/ttyYahboom0` | Serial device |
-| `baud` | `460800` | UART baud rate |
-| `imu_rate_hz` | `50` | IMU stream rate (Hz) |
-| `steer_us_per_rad` | `950.0` | Servo scale µs/rad — **calibration knob** |
+|---|---|---|
+| `port` / `baud` | `/dev/ttyYahboom0` / 460800 | serial device |
+| `imu_rate_hz` | 50 | IMU stream rate |
+| `steer_lut_us` / `steer_lut_rad` | measured table | **steering calibration** — piecewise-linear µs↔rad LUT |
+| `steer_us_per_rad` | — | legacy single-scale fallback, used only if no LUT is given |
+| `steer_max_rate_rad_s` | 4.0 | slew limit applied to reported steer position |
+| `pan_us_per_rad` / `tilt_us_per_rad` | 500.0 | camera servo scale |
 
-### Joint Interfaces
+The steering LUT is sorted ascending by µs and **descending** by rad (positive µs
+= right turn = negative rad). `lut_rad_to_us()` / `lut_us_to_rad()` interpolate
+between entries and clamp at the ends. The table in the xacro was measured from a
+wheel-angle photo (2026-05-22).
 
-State: `back_{left,right}_joint` position+velocity; `front_{left,right}_steer_joint` position;
-`front_{left,right}_wheel_joint` position (passive, held 0).
+### Joints
 
-Command: `back_{left,right}_joint` velocity (rad/s); `front_{left,right}_steer_joint`
-position (rad, ±0.6 rad — URDF limit).
+- State: `back_{left,right}_joint` position+velocity; `front_{left,right}_steer_joint`
+  position; `front_{left,right}_wheel_joint` position (passive, estimated from the
+  rear-wheel average); `pan_joint` / `tilt_joint` (open-loop, state = last command).
+- Command: rear wheels velocity (rad/s); steer joints position (±0.6 rad);
+  pan/tilt position (±1.57 rad).
 
-### Serial Protocol (binary, 0xAA-framed, CRC-8 poly 0x31)
+### Serial protocol (`[0xAA][TYPE][LEN][PAYLOAD][CRC8]`, CRC-8 poly 0x31)
 
-| Msg | ID | Direction | Content |
-|-----|----|-----------|---------|
-| MSG_CMD_VEL | 0x80 | Pi→STM32 | int16 LE: left_dps, right_dps, steer_delta_us |
-| MSG_REQ | 0x81 | Pi→STM32 | stream id to request once |
-| MSG_SET_RATE | 0x82 | Pi→STM32 | stream id + Hz (0=stop) |
-| MSG_TIMESYNC | 0x84 | Pi→STM32 | T1 timestamp (µs) |
-| MSG_SERVO_CENTER | 0x86 | Pi→STM32 | servo_id + center_us LE |
-| STREAM_JOINT | 0x01 | STM32→Pi | enc_l, enc_r (int32), steer_delta_us (int16), seq, vel_l, vel_r, pi_time |
-| STREAM_IMU | 0x02 | STM32→Pi | accel xyz + gyro xyz + mag xyz (int16, ×0.001) |
+| Msg | ID | Direction | Payload |
+|---|---|---|---|
+| `MSG_CMD_VEL` | 0x80 | Pi→STM32 | int16 LE ×3: left_dps, right_dps, steer_delta_us |
+| `MSG_SET_RATE` | 0x82 | Pi→STM32 | stream id + Hz (0 = stop) |
+| `MSG_TIMESYNC` | 0x84 | Pi→STM32 | T1 timestamp |
+| `MSG_SERVO_WRITE` | 0x87 | Pi→STM32 | servo id (1=pan, 2=tilt) + int16 LE delta µs |
+| `STREAM_JOINT` | 0x01 | STM32→Pi | encoders, steer µs, seq, velocities, echoed Pi time |
+| `STREAM_IMU` | 0x02 | STM32→Pi | accel + gyro (×0.001) + mag (×0.1 µT) as int16 |
+| `MSG_TIMESYNC_RESP` | 0x05 | STM32→Pi | timesync reply |
 
-**Steer encoding**: `delta_us = round(-steer_rad × steer_us_per_rad)` — sent as int16 LE.
-Firmware does `pwm = center_us + delta_us` (clamps to [min_pulse_us, max_pulse_us]).
-The servo center is runtime-adjustable via `MSG_SERVO_CENTER` and persisted in STM32 settings.
+Key behaviours:
 
-### Key Implementation Details
+- `on_activate()` sets JOINT to **100 Hz** and IMU to `imu_rate_hz`. Streams are
+  pushed, not polled — `read()` just consumes the newest staged frame and warns
+  (throttled) when none arrived. `on_deactivate()` sets both rates to 0.
+- `write()` runs every control cycle (50 Hz): one `MSG_CMD_VEL` (steer = average
+  of the two commanded steer angles, through the LUT) plus a `MSG_SERVO_WRITE`
+  each for pan and tilt.
+- `reader_loop()` (thread) decodes frames and publishes `/imu/data_raw` and
+  `/imu/mag` from its own `picar2_imu` node. IMU axes are remapped chip→robot in
+  `dispatch_imu_frame()`; there is no tilt-correction matrix any more — mounting
+  error is handled by `imu_calib`.
+- `timesync_loop()` (thread) sends `MSG_TIMESYNC` at 1 Hz; sensor lag is logged
+  every 5 s.
+- Firmware watchdog: 500 ms without `MSG_CMD_VEL` → motors stop and the board
+  falls back to RC input.
 
-- `read()` sends MSG_REQ(JOINT) and waits ≤5 ms for the frame via a condition_variable.
-  If no frame arrives, stale data is used and a throttled WARN is logged.
-- `write()` sends MSG_CMD_VEL every control cycle (50 Hz). Averages left/right steer angles.
-- `reader_loop()` (background thread) decodes frames and publishes `/imu/data_raw` + `/imu/mag`.
-- `timesync_loop()` (background thread) sends MSG_TIMESYNC at 1 Hz for latency measurement.
-- IMU axes are remapped and tilt-corrected via precomputed rotation matrix `imu_R_[3][3]`
-  (R = Ry(pitch) × Rx(roll)) in `dispatch_imu_frame()`.
-
-## Robot Geometry (controllers.yaml)
+## Geometry & tuning (`config/controllers.yaml`)
 
 | Param | Value |
-|-------|-------|
+|---|---|
 | wheelbase | 0.235 m |
 | traction_track_width | 0.1685 m |
 | steering_track_width | 0.173 m |
-| traction_wheels_radius | 0.033 m (**needs calibration**) |
-| reference_timeout | 0.5 s (matches STM32 watchdog) |
-| enable_odom_tf | false (EKF owns odom→base_footprint) |
+| traction_wheels_radius | 0.033 m (**still marked TODO: calibrate**) |
+| update_rate | 50 Hz |
+| reference_timeout | 0.5 s (matches firmware watchdog) |
+| enable_odom_tf | false — EKF owns `odom→base_footprint` |
+| cmd_vel_relay max_angular_vel | 1.2 rad/s |
+| cmd_vel_relay max_reverse_vel | 0.25 m/s |
 
-## Calibration Parameters
+EKF (`config/ekf.yaml`): `two_d_mode`, 50 Hz. Takes x/y/yaw/vx from
+`/ackermann_steering_controller/odometry` and **yaw rate only** from `/imu/data`.
+
+## Navigation
+
+Nav2 is configured for a car-like robot that **cannot spin in place**:
+
+- Planner: `SmacPlannerHybrid`, `REEDS_SHEPP`, `minimum_turning_radius: 0.5`
+  (measured; theoretical ≈0.34), `angle_quantization_bins: 36` — 72 caused ~42 s
+  startup on the Pi 4.
+- Controller: `RegulatedPurePursuitController`, `use_rotate_to_heading: false`,
+  `allow_reversing: true`, `desired_linear_vel: 0.40`.
+- Behaviors: backup / drive_on_heading / wait — **no spin**.
+- BT: `navigate_through_poses` uses `config/nav_through_poses_ackermann.xml`
+  (upstream tree with `<Spin>` stripped), wired in from `nav2.launch.py`.
+- Costmaps: explicit rectangular `footprint` (base_footprint sits at the rear
+  axle, chassis extends 40 mm behind it); obstacle sources are `/lidar_node/scan`
+  and `/sen0628/pointcloud`.
+- `rcl_yaml_param_parser` does **not** support YAML anchors — an attempt to
+  deduplicate the costmap blocks with them was reverted.
+
+`scripts/loop_waypoints.py` drives `NavigateThroughPoses` with a rolling window so
+the robot laps a waypoint list without stopping. Waypoint YAML matches the RViz
+Nav2 panel "Save Waypoints" format (orientation is **w-first**).
+
+## SLAM
+
+`config/cartographer.lua`: `tracking_frame = imu_link`, `published_frame = odom`,
+`use_odometry` and `use_imu_data` both on, online correlative scan matching,
+range 0.06–5.0 m, `pose_publish_period_sec = 20e-3` (200 Hz was too much for the Pi).
+
+Cartographer is the baseline that works — it feeds the IMU straight into scan
+matching, whereas slam_toolbox leans on wheel odometry and suffers from Ackermann
+calibration error. Don't regress to slam_toolbox without a reason. Note
+`slam-localize` must use `localization_slam_toolbox_node`; `async_slam_toolbox_node`
+ignores `/initialpose` regardless of its `mode` parameter.
+
+## Calibration
 
 | What | Where | How |
-|------|-------|-----|
-| Wheel radius | `controllers.yaml` `traction_wheels_radius` | straight-line test with odom_cal.py |
-| Steer scale | `picar2.urdf.xacro` `steer_us_per_rad` | circle test with odom_cal.py |
-| Servo center | STM32 settings (persistent) | `tools/servo_center.py` or shell `servo center 0 <us>` |
-| IMU tilt | `picar2.urdf.xacro` `imu_mount_roll/pitch` | `imu cal accel` on STM32 shell, then update URDF |
-| IMU gyro bias | STM32 settings | `imu cal gyro` on STM32 shell |
+|---|---|---|
+| Wheel radius | `controllers.yaml` `traction_wheels_radius` | straight-line test, `make odom-cal` |
+| Steering LUT | `picar2.urdf.xacro` `steer_lut_us` / `steer_lut_rad` | measured wheel angles; refine with the odom_cal circle test |
+| Accel/gyro | `config/imu_calib.yaml` | `make imu-calib` (6-position routine, needs bringup running) |
+| Magnetometer hard-iron | `config/magnetometer_calib.yaml` | `make mag-calib` on the PC, then `ros2 service call /calibrate_magnetometer std_srvs/srv/Trigger {}` and rotate 360° for ~30 s |
+| Servo centers, gyro bias | STM32 settings (persistent) | Zephyr shell on `/dev/ttyYahboom1` |
+| IMU sanity check | — | `make imu-verify` (`imu_verify.py`) |
+
+## Devices (udev, `etc/99-picar.rules`)
+
+`/dev/ttyYahboom0` (STM32 protocol, 460800) · `/dev/ttyYahboom1` (Zephyr shell,
+921600) · `/dev/ldlidar` (LD19) · `/dev/ld07` · `/dev/sen0628`.
+`make install-uarts` also installs `zephyr-shell.service`, exposing the shell on
+TCP 4444 (`putty -raw <pi-ip> 4444`).
 
 ## Topics
 
-| Topic | Type | Publisher | Notes |
-|-------|------|-----------|-------|
-| `/cmd_vel` | Twist | teleop/nav | relayed to controller |
-| `/ackermann_steering_controller/odometry` | Odometry | controller | wheel odometry |
-| `/imu/data_raw` | Imu | picar2_hardware | no orientation |
-| `/imu/data` | Imu | imu_filter_madgwick | with orientation (no mag) |
-| `/imu/mag` | MagneticField | picar2_hardware | soft-iron distortion present — mag fusion disabled |
-| `/odom` | Odometry | robot_localization EKF | fused odom + IMU |
-| `/scan` | LaserScan | lidar_node | LiDAR scan |
-| `/joint_states` | JointState | joint_state_broadcaster | — |
+| Topic | Type | Source |
+|---|---|---|
+| `/cmd_vel` | Twist | teleop / Nav2 → relayed to `/ackermann_steering_controller/reference` |
+| `/ackermann_steering_controller/odometry` | Odometry | wheel odometry |
+| `/imu/data_raw` → `/imu/data_corrected` → `/imu/data` | Imu | hardware → imu_calib → Madgwick |
+| `/imu/mag` → `/imu/mag_unbiased` | MagneticField | hardware → bias remover |
+| `/odom` | Odometry | EKF (remapped from `/odometry/filtered`) |
+| `/lidar_node/scan` | LaserScan | lidar driver (both models remap to this) |
+| `/sen0628/pointcloud` | PointCloud2 | SEN0628 ToF |
+| `/joint_states` | JointState | joint_state_broadcaster |
+| `/pan_tilt_controller/commands` | Float64MultiArray | camera pan/tilt (also driven by the WebXR FPV client) |
 
 ## Pitfalls
 
-- **RViz config**: never hand-edit `config/rviz.rviz` — missing `Views` fields break mouse input.
-  Always save from within RViz.
-- **Magnetometer**: `use_mag: False` in imu_filter config — motor soft-iron causes yaw drift
-  when mag is enabled. Do not re-enable.
-- **odom-cal on PC**: requires `PI_IP` and `PC_IFACE` — Cyclone DDS fails silently if empty.
-- **Steer unit**: steer field in MSG_CMD_VEL is µs delta from servo center (not degrees).
-  `steer_us_per_rad` is the sole conversion factor between rad and µs.
-- **Symlink install**: `colcon build --symlink-install` is used — Python scripts and config
-  files are symlinked, so edits in `src/` take effect without rebuild for those files.
-  C++ changes still require a rebuild.
+- **Never hand-edit `.rviz` files.** A missing or incomplete `Views/Current` block
+  makes the Ogre render panel silently ignore mouse input (Qt menus keep working).
+  Configure in RViz and use File → Save Config As.
+- **Never run `make sync2pi`** or any rsync to the Pi — syncing is done by hand.
+- **PC tools need `PI_IP` + `PC_IFACE`.** Empty values fail silently.
+- **Clock skew breaks TF** across Pi/PC. chrony setup is in the README.
+- **Steer units**: the CMD_VEL steer field is a µs delta from the servo center, not
+  degrees or radians. The LUT is the only rad↔µs conversion.
+- **`--symlink-install`** means Python and config edits under `src/` take effect
+  without rebuilding; C++ changes still need `make build`.
+- **Docker vs host build trees** are separate (`install/` vs `install-docker/`).
+  Sourcing the wrong one gives confusing "package not found" errors.
+- Third-party Gazebo worlds usually need `scripts/patch_gz_world.py` before they
+  will load.
