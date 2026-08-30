@@ -1,0 +1,24 @@
+[Unit]
+Description=PICAR-2 ROS 2 bringup (docker)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --rm plus a named container: systemd owns the docker client, ExecStop stops
+# the container properly rather than leaving an orphan behind a killed exec.
+ExecStartPre=-/usr/bin/docker rm -f picar2-bringup
+ExecStart=/usr/bin/docker run --rm --name picar2-bringup @FLAGS@ @IMAGE@ \
+  bash -lc 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
+            export CYCLONEDDS_URI=file:///ws/cyclonedds.xml && \
+            source /opt/ros/jazzy/setup.bash && \
+            source /ws/@INSTALL@/setup.bash && \
+            exec ros2 launch picar2_bringup picar2.launch.py lidar:=@LIDAR@ use_joy:=@USE_JOY@'
+ExecStop=/usr/bin/docker stop -t 20 picar2-bringup
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

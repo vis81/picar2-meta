@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#11141a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>PICAR-2 Mapping</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="bar">
+  <span id="dot" class="dot"></span>
+  <span id="state">connecting…</span>
+  <span class="spacer"></span>
+  <span id="chips"></span>
+</header>
+
+<canvas id="map"></canvas>
+
+<div id="hint" class="hint">Press <b>Start mapping</b> and the robot will explore on its own.</div>
+
+<div id="stick" class="stick hidden">
+  <div id="knob" class="knob"></div>
+</div>
+
+<footer id="controls">
+  <button id="start" class="btn primary">Start mapping</button>
+  <button id="explore" class="btn hidden">Pause exploring</button>
+  <button id="save" class="btn hidden">Finish &amp; save</button>
+  <button id="stop" class="btn danger hidden">Stop</button>
+</footer>
+
+<div id="sheet" class="sheet hidden">
+  <div class="sheet-inner">
+    <h2>Save this map</h2>
+    <p>Saving seals the map — the robot stops adding to it.</p>
+    <input id="mapname" type="text" placeholder="e.g. ground-floor" autocomplete="off">
+    <div class="sheet-buttons">
+      <button id="cancel-save" class="btn">Cancel</button>
+      <button id="confirm-save" class="btn primary">Save</button>
+    </div>
+    <div id="saveerr" class="err"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+[Unit]
+Description=PICAR-2 phone web UI (docker)
+Requires=docker.service
+After=docker.service picar-bringup.service
+Wants=picar-bringup.service
+
+[Service]
+Type=simple
+# Its own container rather than `docker exec` into the bringup one: systemd
+# can't reliably reap an exec'd process, and cartographer/nav2/explore are
+# launched as children of this process — they need to die with it.
+# --network host + --ipc host puts it on the same DDS loopback as bringup.
+ExecStartPre=-/usr/bin/docker rm -f picar2-webui
+ExecStart=/usr/bin/docker run --rm --name picar2-webui @FLAGS@ @IMAGE@ \
+  bash -lc 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
+            export CYCLONEDDS_URI=file:///ws/cyclonedds.xml && \
+            export PICAR_WS=/ws && \
+            export PICAR_WEBUI_PORT=@PORT@ && \
+            source /opt/ros/jazzy/setup.bash && \
+            source /ws/@INSTALL@/setup.bash && \
+            exec python3 /ws/etc/webui/server.py'
+ExecStop=/usr/bin/docker stop -t 30 picar2-webui
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+
+[Install]
+WantedBy=multi-user.target

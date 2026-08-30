@@ -94,6 +94,16 @@ _DOCKER_FLAGS := --privileged --network host --ipc host \
                  -v /dev:/dev \
                  -v $(WS):/ws -w /ws
 
+# Flags for the boot services (webui-setup). Same device/network access as
+# _DOCKER_FLAGS but without the X11 and DISPLAY bits, which are useless
+# headless and would bake a stale :0 into the unit file.
+_SVC_DOCKER_FLAGS := --privileged --network host --ipc host \
+                     -u $(shell id -u):$(shell id -g) \
+                     --group-add dialout --group-add plugdev --group-add kmem \
+                     $(if $(_GID_GPIO),--group-add $(_GID_GPIO)) \
+                     $(if $(_GID_INPUT),--group-add $(_GID_INPUT)) \
+                     -v /dev:/dev -v $(WS):/ws -w /ws
+
 # ── Execution wrapper ────────────────────────────────────────────────────────
 # host:   run commands directly via bash -c
 # docker: exec into the persistent $(CONTAINER_NAME) container started by
@@ -108,7 +118,7 @@ endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
-        docker-start docker-stop sync2pi softap softap-down install-uarts fpv-setup fpv fpv-stop clean
+        docker-start docker-stop sync2pi softap softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
 all: build
 
@@ -371,6 +381,38 @@ install-uarts:
 	sudo systemctl daemon-reload
 	sudo systemctl enable --now zephyr-shell
 	@echo "Done — unplug and replug USB adapters, then connect via: putty -raw <pi-ip> 4444"
+
+# ── Phone web UI — map building ──────────────────────────────────────────────
+# webui:       run the backend in the foreground (bringup must already be up).
+# webui-setup: install picar-bringup + picar-webui as boot services, so the
+#              phone is the only interface needed — power on, open the page.
+WEBUI_PORT ?= 8080
+
+webui:
+	$(CMD) "$(ROS_SETUP) && PICAR_WS=$(WS_PATH) PICAR_WEBUI_PORT=$(WEBUI_PORT) python3 $(WS_PATH)/etc/webui/server.py"
+
+# The services run in the picar2-ros2 image, so flask/waitress come from the
+# image, not the host. INSTALL is install-docker because that is what the
+# container builds into.
+webui-setup:
+	@for unit in picar-bringup picar-webui; do \
+	  sed -e 's|@FLAGS@|$(_SVC_DOCKER_FLAGS)|g' \
+	      -e 's|@IMAGE@|$(IMAGE)|g' \
+	      -e 's|@INSTALL@|install-docker|g' \
+	      -e 's|@LIDAR@|$(strip $(LIDAR))|g' \
+	      -e 's|@USE_JOY@|$(strip $(USE_JOY))|g' \
+	      -e 's|@PORT@|$(WEBUI_PORT)|g' \
+	      $(WS)/etc/webui/$$unit.service | sudo tee /etc/systemd/system/$$unit.service >/dev/null; \
+	done
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now picar-bringup picar-webui
+	@ip="$$(hostname -I | awk '{print $$1}')"; \
+	 echo ""; \
+	 echo "  Open on your phone:  http://$$ip:$(WEBUI_PORT)/"; \
+	 echo ""
+
+webui-stop:
+	sudo systemctl stop picar-webui picar-bringup
 
 # ── FPV (Meta Quest 3) — MediaMTX on host (not docker) + WebXR client ────────
 # fpv-setup: one-time installer (libcamera-apps, MediaMTX, TLS cert, systemd unit).
