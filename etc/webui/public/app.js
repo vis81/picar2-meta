@@ -16,6 +16,7 @@ let mapSeq = -1;
 let pose = null;
 let modes = {};
 let detail = {};
+let phase = 'idle';
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -122,6 +123,7 @@ async function poll() {
     const s = await (await fetch('/api/status')).json();
     modes = s.modes || {};
     detail = s.detail || {};
+    phase = s.phase || 'idle';
     pose = s.pose;
     reportFailures();
     setLive(true);
@@ -136,9 +138,14 @@ async function poll() {
 
 function setLive(ok) {
   $('dot').className = 'dot ' + (ok ? 'live' : 'dead');
-  $('state').textContent = ok
-    ? (modes.cartographer ? (modes.explore ? 'exploring' : 'mapping — paused') : 'idle')
-    : 'no connection';
+  if (!ok) { $('state').textContent = 'no connection'; return; }
+  if (phase && phase !== 'idle' && phase !== 'mapping') {
+    $('state').textContent = phase + '…';        // e.g. "waiting for nav2…"
+  } else {
+    $('state').textContent = modes.cartographer
+      ? (modes.explore ? 'exploring' : 'mapping — paused')
+      : 'idle';
+  }
 }
 
 function renderChips() {
@@ -191,7 +198,7 @@ $('start').onclick = async () => {
   const hint = $('hint');
   hint.dataset.showing = '';
   hint.classList.remove('hidden');
-  hint.textContent = 'Starting cartographer and nav2…';
+  hint.textContent = 'Starting cartographer, then nav2 — nav2 takes up to a minute on the Pi.';
   await post('/api/mapping/start', { autonomous: true });
   setTimeout(() => { $('start').disabled = false; }, 4000);
 };

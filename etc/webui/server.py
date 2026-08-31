@@ -90,6 +90,15 @@ class RobotLink(Node):
         with self._lock:
             return self._map, self._map_seq
 
+    def has_map(self) -> bool:
+        with self._lock:
+            return self._map is not None
+
+    def costmap_ready(self) -> bool:
+        """explore_lite reads Nav2's global costmap and silently does nothing
+        if it starts before that exists."""
+        return self.count_publishers("/global_costmap/costmap") > 0
+
     # ── pose ─────────────────────────────────────────────────────────────
     def pose(self):
         """Robot pose in the map frame, or None before the map exists."""
@@ -149,6 +158,8 @@ class ModeStack:
     def __init__(self):
         self._procs: dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
+        self._abort = threading.Event()
+        self.phase = "idle"
         os.makedirs(self.LOG_DIR, exist_ok=True)
 
     def log_path(self, name: str) -> str:
@@ -199,17 +210,44 @@ class ModeStack:
             }
         return out
 
-    def start_mapping(self, autonomous: bool):
-        with self._lock:
-            if not self.running("cartographer"):
+    def _wait_until(self, pred, timeout: float, phase: str) -> bool:
+        self.phase = phase
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._abort.is_set():
+                return False
+            if pred():
+                return True
+            time.sleep(0.5)
+        return False
+
+    def start_mapping(self, autonomous: bool, link: "RobotLink"):
+        """Wait for each layer to actually be usable before starting the next.
+
+        Fixed sleeps do not work here: Nav2's Smac planner takes tens of
+        seconds to come up on a Pi 4, and explore_lite started before the
+        global costmap exists just sits there doing nothing.
+        """
+        self._abort.clear()
+
+        if not self.running("cartographer"):
+            with self._lock:
                 self._launch("cartographer", "cartographer.launch.py")
-                # Nav2's costmaps need /map to exist before they settle.
-                time.sleep(5.0)
-            if not self.running("nav2"):
+        if not self._wait_until(link.has_map, 60.0, "waiting for the map"):
+            self.phase = "cartographer published no map"
+            return
+
+        if not self.running("nav2"):
+            with self._lock:
                 self._launch("nav2", "nav2.launch.py")
-                time.sleep(3.0)
-            if autonomous and not self.running("explore"):
+        if not self._wait_until(link.costmap_ready, 180.0, "waiting for nav2"):
+            self.phase = "nav2 global costmap never appeared"
+            return
+
+        if autonomous and not self.running("explore"):
+            with self._lock:
                 self._launch("explore", "explore.launch.py")
+        self.phase = "mapping"
 
     def set_explore(self, on: bool):
         with self._lock:
@@ -219,6 +257,8 @@ class ModeStack:
                 self._stop("explore")
 
     def stop_all(self):
+        self._abort.set()
+        self.phase = "idle"
         with self._lock:
             for name in reversed(self.LAYERS):
                 self._stop(name)
@@ -308,6 +348,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         return jsonify({
             "modes": modes.status(),
             "detail": modes.detail(),
+            "phase": modes.phase,
             "pose": link.pose(),
             "map_seq": seq,
             "has_map": grid is not None,
@@ -339,7 +380,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     def mapping_start():
         auto = bool((request.json or {}).get("autonomous", True))
         threading.Thread(
-            target=modes.start_mapping, args=(auto,), daemon=True
+            target=modes.start_mapping, args=(auto, link), daemon=True
         ).start()
         return jsonify({"ok": True})
 
