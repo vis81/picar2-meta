@@ -77,6 +77,7 @@ class RobotLink(Node):
         self._drive = (0.0, 0.0)
         self._drive_stamp = 0.0
         self._drive_was_active = False
+        self.pose_error = "no lookup yet"
 
         self.create_timer(1.0 / DRIVE_RATE_HZ, self._drive_tick)
 
@@ -94,6 +95,13 @@ class RobotLink(Node):
         with self._lock:
             return self._map is not None
 
+    def tf_frames(self) -> str:
+        """Whole TF tree as the buffer sees it — shows which link is missing."""
+        try:
+            return self._tf_buffer.all_frames_as_yaml()
+        except Exception as e:
+            return f"error: {e}"
+
     def costmap_ready(self) -> bool:
         """explore_lite reads Nav2's global costmap and silently does nothing
         if it starts before that exists."""
@@ -106,7 +114,11 @@ class RobotLink(Node):
             tf = self._tf_buffer.lookup_transform(
                 "map", "base_footprint", Time()
             )
-        except Exception:
+            self.pose_error = None
+        except Exception as e:
+            # Keep the reason — a null pose is the symptom of a broken TF
+            # chain, and which exception it is says where the break is.
+            self.pose_error = f"{type(e).__name__}: {e}"
             return None
 
         t = tf.transform.translation
@@ -422,6 +434,19 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         pkg = subprocess.run(["ros2", "pkg", "prefix", "picar2_bringup"],
                              capture_output=True, text=True)
         return jsonify({
+            "pose_error": link.pose_error,
+            "tf_frames": link.tf_frames(),
+            "publishers": {
+                "/tf": link.count_publishers("/tf"),
+                "/scan": link.count_publishers("/scan"),
+                "/lidar_node/scan": link.count_publishers("/lidar_node/scan"),
+                "/map": link.count_publishers("/map"),
+                "/global_costmap/costmap": link.count_publishers("/global_costmap/costmap"),
+                "/cmd_vel": link.count_publishers("/cmd_vel"),
+            },
+            "subscribers": {
+                "/cmd_vel": link.count_subscribers("/cmd_vel"),
+            },
             "ros2": which.stdout.strip(),
             "picar2_bringup_prefix": pkg.stdout.strip() or pkg.stderr.strip(),
             "ROS_DISTRO": os.environ.get("ROS_DISTRO"),
