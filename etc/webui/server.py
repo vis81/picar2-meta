@@ -144,17 +144,28 @@ class ModeStack:
     """Starts and stops the cartographer → nav2 → explore chain."""
 
     LAYERS = ("cartographer", "nav2", "explore")
+    LOG_DIR = "/tmp/picar-webui"
 
     def __init__(self):
         self._procs: dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
+        os.makedirs(self.LOG_DIR, exist_ok=True)
+
+    def log_path(self, name: str) -> str:
+        return os.path.join(self.LOG_DIR, f"{name}.log")
 
     def _launch(self, name: str, launch_file: str):
+        # Output goes to a file, never DEVNULL: a launch that dies on startup
+        # is the most likely failure here, and discarding stderr makes it
+        # invisible from the phone.
+        log = open(self.log_path(name), "wb")
         cmd = ["ros2", "launch", "picar2_bringup", launch_file]
+        log.write(f"$ {' '.join(cmd)}\n".encode())
+        log.flush()
         self._procs[name] = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
             start_new_session=True,   # so we can kill the whole launch tree
         )
 
@@ -162,8 +173,31 @@ class ModeStack:
         p = self._procs.get(name)
         return p is not None and p.poll() is None
 
+    def exit_code(self, name: str):
+        p = self._procs.get(name)
+        return None if p is None else p.poll()
+
+    def log_tail(self, name: str, lines: int = 40) -> str:
+        try:
+            with open(self.log_path(name), "r", errors="replace") as f:
+                return "".join(f.readlines()[-lines:])
+        except OSError:
+            return ""
+
     def status(self) -> dict:
         return {name: self.running(name) for name in self.LAYERS}
+
+    def detail(self) -> dict:
+        """Per-layer state including why a layer stopped, for the UI."""
+        out = {}
+        for name in self.LAYERS:
+            code = self.exit_code(name)
+            out[name] = {
+                "running": self.running(name),
+                "exit": code,
+                "failed": code is not None and code != 0,
+            }
+        return out
 
     def start_mapping(self, autonomous: bool):
         with self._lock:
@@ -273,6 +307,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         grid, seq = link.map_snapshot()
         return jsonify({
             "modes": modes.status(),
+            "detail": modes.detail(),
             "pose": link.pose(),
             "map_seq": seq,
             "has_map": grid is not None,
@@ -329,6 +364,33 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         modes.set_explore(False)
         ok, detail = save_map(ws, name)
         return jsonify({"ok": ok, "detail": detail}), (200 if ok else 500)
+
+    @app.route("/api/logs")
+    def logs():
+        layer = request.args.get("layer", "cartographer")
+        if layer not in ModeStack.LAYERS:
+            return ("unknown layer", 400)
+        return Response(modes.log_tail(layer, 60), mimetype="text/plain")
+
+    @app.route("/api/debug")
+    def debug():
+        """What environment the launches actually inherit — the usual reason
+        `ros2 launch` dies instantly is a workspace that was never sourced."""
+        which = subprocess.run(["bash", "-lc", "command -v ros2"],
+                               capture_output=True, text=True)
+        pkg = subprocess.run(["ros2", "pkg", "prefix", "picar2_bringup"],
+                             capture_output=True, text=True)
+        return jsonify({
+            "ros2": which.stdout.strip(),
+            "picar2_bringup_prefix": pkg.stdout.strip() or pkg.stderr.strip(),
+            "ROS_DISTRO": os.environ.get("ROS_DISTRO"),
+            "RMW_IMPLEMENTATION": os.environ.get("RMW_IMPLEMENTATION"),
+            "CYCLONEDDS_URI": os.environ.get("CYCLONEDDS_URI"),
+            "ROS_DOMAIN_ID": os.environ.get("ROS_DOMAIN_ID"),
+            "AMENT_PREFIX_PATH": os.environ.get("AMENT_PREFIX_PATH", "").split(":"),
+            "PICAR_WS": os.environ.get("PICAR_WS"),
+            "cwd": os.getcwd(),
+        })
 
     @app.route("/api/drive", methods=["POST"])
     def drive():

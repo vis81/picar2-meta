@@ -15,6 +15,7 @@ let mapData = null;        // {w, h, res, ox, oy, img}
 let mapSeq = -1;
 let pose = null;
 let modes = {};
+let detail = {};
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -120,7 +121,9 @@ async function poll() {
   try {
     const s = await (await fetch('/api/status')).json();
     modes = s.modes || {};
+    detail = s.detail || {};
     pose = s.pose;
+    reportFailures();
     setLive(true);
 
     if (s.map_seq !== mapSeq) { mapSeq = s.map_seq; if (s.has_map) fetchMap(); }
@@ -160,6 +163,21 @@ function renderControls() {
   if (mapping) $('hint').classList.add('hidden');
 }
 
+// A layer that exited non-zero means the launch died — show why, since the
+// alternative is a button that silently does nothing.
+async function reportFailures() {
+  const bad = Object.keys(detail).find((k) => detail[k].failed);
+  if (!bad) return;
+  const hint = $('hint');
+  if (hint.dataset.showing === bad) return;
+  hint.dataset.showing = bad;
+  hint.classList.remove('hidden');
+  let tail = '';
+  try { tail = await (await fetch('/api/logs?layer=' + bad)).text(); } catch (e) {}
+  hint.innerHTML = `<b>${bad} failed to start</b><pre>` +
+    (tail.split('\n').slice(-8).join('\n') || 'no output') + '</pre>';
+}
+
 const post = (url, body) => fetch(url, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -170,7 +188,10 @@ const post = (url, body) => fetch(url, {
 
 $('start').onclick = async () => {
   $('start').disabled = true;
-  $('hint').textContent = 'Starting cartographer and nav2…';
+  const hint = $('hint');
+  hint.dataset.showing = '';
+  hint.classList.remove('hidden');
+  hint.textContent = 'Starting cartographer and nav2…';
   await post('/api/mapping/start', { autonomous: true });
   setTimeout(() => { $('start').disabled = false; }, 4000);
 };
