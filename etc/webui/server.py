@@ -36,7 +36,9 @@ import rclpy
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
 from geometry_msgs.msg import Twist
+from explore_lite_msgs.msg import ExploreStatus
 from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Bool
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -66,8 +68,21 @@ class RobotLink(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(OccupancyGrid, "/map", self._on_map, map_qos)
+        # explore_lite searches the global costmap, not /map — and unlike
+        # cartographer's output it uses the standard scale (0 free, 100
+        # occupied), so it is also the only one worth thresholding.
+        self.create_subscription(OccupancyGrid, "/global_costmap/costmap",
+                                 self._on_costmap, map_qos)
+        self._costmap_free = 0
 
         self._cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        # explore_lite stops permanently the first time it finds no frontiers.
+        # At startup that happens routinely, before the global costmap has
+        # copied the map in — resume puts it back to work.
+        self._resume_pub = self.create_publisher(Bool, "/explore/resume", 10)
+        self.create_subscription(
+            ExploreStatus, "/explore/status", self._on_explore_status, 10)
+        self.explore_status = None
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
@@ -81,6 +96,22 @@ class RobotLink(Node):
 
         self.create_timer(1.0 / DRIVE_RATE_HZ, self._drive_tick)
 
+    def _on_explore_status(self, msg: ExploreStatus):
+        self.explore_status = msg.status
+
+    def resume_explore(self):
+        self._resume_pub.publish(Bool(data=True))
+
+    def free_cells(self) -> int:
+        """Known-free cells in cartographer's map. Note the scale: cartographer
+        publishes probabilities, so free space reads ~42 and occupied ~68 —
+        not the 0/100 of a map_server grid. Threshold at the 50 midpoint."""
+        with self._lock:
+            if self._map is None:
+                return 0
+            cells = np.frombuffer(bytes(self._map.data), dtype=np.int8)
+            return int(np.count_nonzero((cells >= 0) & (cells < 50)))
+
     # ── map ──────────────────────────────────────────────────────────────
     def _on_map(self, msg: OccupancyGrid):
         with self._lock:
@@ -91,9 +122,26 @@ class RobotLink(Node):
         with self._lock:
             return self._map, self._map_seq
 
+    def _on_costmap(self, msg: OccupancyGrid):
+        cells = np.frombuffer(bytes(msg.data), dtype=np.int8)
+        self._costmap_free = int(np.count_nonzero((cells >= 0) & (cells <= 25)))
+
+    def costmap_free(self) -> int:
+        return self._costmap_free
+
     def has_map(self) -> bool:
         with self._lock:
             return self._map is not None
+
+    def map_info(self):
+        with self._lock:
+            if self._map is None:
+                return None
+            i = self._map.info
+            return {
+                "width": i.width, "height": i.height,
+                "resolution": i.resolution, "cells": len(self._map.data),
+            }
 
     def tf_frames(self) -> str:
         """Whole TF tree as the buffer sees it — shows which link is missing."""
@@ -103,9 +151,10 @@ class RobotLink(Node):
             return f"error: {e}"
 
     def costmap_ready(self) -> bool:
-        """explore_lite reads Nav2's global costmap and silently does nothing
-        if it starts before that exists."""
-        return self.count_publishers("/global_costmap/costmap") > 0
+        """Not just "is it published" — explore_lite needs free space in it to
+        search outward from, or its first plan finds no frontiers and stops
+        for good."""
+        return self._costmap_free > 400
 
     # ── pose ─────────────────────────────────────────────────────────────
     def pose(self):
@@ -241,7 +290,14 @@ class ModeStack:
         global costmap exists just sits there doing nothing.
         """
         self._abort.clear()
+        try:
+            self._start_mapping(autonomous, link)
+        except Exception as e:
+            # A dead thread leaves the phase frozen on whatever it was doing,
+            # which reads exactly like a hang.
+            self.phase = f"error: {type(e).__name__}: {e}"
 
+    def _start_mapping(self, autonomous: bool, link: "RobotLink"):
         if not self.running("cartographer"):
             with self._lock:
                 self._launch("cartographer", "cartographer.launch.py")
@@ -259,7 +315,26 @@ class ModeStack:
         if autonomous and not self.running("explore"):
             with self._lock:
                 self._launch("explore", "explore.launch.py")
+            threading.Thread(target=self._nurse_explore, args=(link,),
+                             daemon=True).start()
         self.phase = "mapping"
+
+    def _nurse_explore(self, link: "RobotLink"):
+        """explore_lite gives up permanently on its first empty frontier search.
+        For the first minute, nudge it back if it does that while the map is
+        still growing — a genuine 'complete' only counts once the map is
+        stable."""
+        deadline = time.monotonic() + 60.0
+        last_seq = -1
+        while time.monotonic() < deadline and not self._abort.is_set():
+            time.sleep(5.0)
+            if not self.running("explore"):
+                return
+            _, seq = link.map_snapshot()
+            growing = seq != last_seq
+            last_seq = seq
+            if link.explore_status == ExploreStatus.EXPLORATION_COMPLETE and growing:
+                link.resume_explore()
 
     def set_explore(self, on: bool):
         with self._lock:
@@ -361,6 +436,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "modes": modes.status(),
             "detail": modes.detail(),
             "phase": modes.phase,
+            "explore_status": link.explore_status,
             "pose": link.pose(),
             "map_seq": seq,
             "has_map": grid is not None,
@@ -418,6 +494,11 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         ok, detail = save_map(ws, name)
         return jsonify({"ok": ok, "detail": detail}), (200 if ok else 500)
 
+    @app.route("/api/explore/resume", methods=["POST"])
+    def explore_resume():
+        link.resume_explore()
+        return jsonify({"ok": True})
+
     @app.route("/api/logs")
     def logs():
         layer = request.args.get("layer", "cartographer")
@@ -435,6 +516,10 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
                              capture_output=True, text=True)
         return jsonify({
             "pose_error": link.pose_error,
+            "free_cells": link.free_cells(),
+            "costmap_free": link.costmap_free(),
+            "map_info": link.map_info(),
+            "explore_status": link.explore_status,
             "tf_frames": link.tf_frames(),
             "publishers": {
                 "/tf": link.count_publishers("/tf"),

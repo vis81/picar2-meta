@@ -17,6 +17,7 @@ let pose = null;
 let modes = {};
 let detail = {};
 let phase = 'idle';
+let exploreStatus = null;
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -30,10 +31,13 @@ function gridToImage(bytes, w, h) {
     const dst = (row * w + (i % w)) * 4;
     const v = bytes[i];
     let r, g, b;
+    // Cartographer publishes occupancy probability, so free space is ~42 and
+    // walls ~68 — not the 0/100 a map_server grid uses. Split at the 50
+    // midpoint, or the whole map renders as undifferentiated grey.
     if (v === 255) { r = 42; g = 47; b = 55; }            // unknown
-    else if (v >= 65) { r = 12; g = 15; b = 20; }         // occupied
-    else if (v <= 25) { r = 232; g = 234; b = 237; }      // free
-    else { const t = 200 - v; r = g = b = t; }            // uncertain
+    else if (v >= 60) { r = 12; g = 15; b = 20; }         // occupied
+    else if (v < 50) { r = 232; g = 234; b = 237; }       // free
+    else { r = g = b = 120; }                             // uncertain
     d[dst] = r; d[dst + 1] = g; d[dst + 2] = b; d[dst + 3] = 255;
   }
   return img;
@@ -124,6 +128,7 @@ async function poll() {
     modes = s.modes || {};
     detail = s.detail || {};
     phase = s.phase || 'idle';
+    exploreStatus = s.explore_status;
     pose = s.pose;
     reportFailures();
     setLive(true);
@@ -143,7 +148,10 @@ function setLive(ok) {
     $('state').textContent = phase + '…';        // e.g. "waiting for nav2…"
   } else {
     $('state').textContent = modes.cartographer
-      ? (modes.explore ? 'exploring' : 'mapping — paused')
+      ? (modes.explore
+          ? (exploreStatus === 'exploration_complete' ? 'explored — nothing left'
+                                                      : 'exploring')
+          : 'mapping — paused')
       : 'idle';
   }
 }
@@ -166,7 +174,9 @@ function renderControls() {
   $('save').classList.toggle('hidden', !mapping);
   $('stop').classList.toggle('hidden', !mapping);
   $('stick').classList.toggle('hidden', !mapping);
-  $('explore').textContent = modes.explore ? 'Pause exploring' : 'Resume exploring';
+  $('explore').textContent = !modes.explore ? 'Resume exploring'
+    : exploreStatus === 'exploration_complete' ? 'Search again'
+    : 'Pause exploring';
   if (mapping) $('hint').classList.add('hidden');
 }
 
@@ -203,7 +213,13 @@ $('start').onclick = async () => {
   setTimeout(() => { $('start').disabled = false; }, 4000);
 };
 
-$('explore').onclick = () => post('/api/explore', { on: !modes.explore });
+$('explore').onclick = () => {
+  if (modes.explore && exploreStatus === 'exploration_complete') {
+    post('/api/explore/resume');   // stalled, not finished — kick it
+  } else {
+    post('/api/explore', { on: !modes.explore });
+  }
+};
 
 $('stop').onclick = async () => {
   if (!confirm('Stop mapping? The map is discarded unless you saved it.')) return;
