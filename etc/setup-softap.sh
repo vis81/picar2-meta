@@ -59,7 +59,7 @@ teardown() {
     nmcli connection delete "$CON_NAME" 2>/dev/null || true
     systemctl disable --now "${UAP_IFACE}.service" 2>/dev/null || true
     rm -f "/etc/systemd/system/${UAP_IFACE}.service"
-    rm -f "/etc/NetworkManager/conf.d/10-${UAP_IFACE}.conf"
+    rm -f /etc/NetworkManager/conf.d/*"${UAP_IFACE}"*.conf
     iw dev "$UAP_IFACE" del 2>/dev/null || true
     systemctl daemon-reload
     systemctl reload NetworkManager 2>/dev/null || true
@@ -77,13 +77,41 @@ if ! systemctl is-active --quiet NetworkManager; then
     exit 1
 fi
 
-# 2. Regdomain (do_wifi_country writes wpa_supplicant.conf, harmless if NM-managed)
+# 2. Pin existing station profiles to the real wifi interface.
+#
+# Without this the AP never survives: NM sees uap0 appear, autoconnects an
+# unpinned home-WiFi profile onto it, wpa_supplicant tries to associate on an
+# AP-mode interface ("Association request to the driver failed"), and the
+# driver removes uap0 — leaving the AP connection with no device. A profile
+# with an empty connection.interface-name attaches to any wifi device.
+log "pinning station profiles to $WLAN_IFACE"
+while IFS= read -r name; do
+    [[ -n "$name" && "$name" != "$CON_NAME" ]] || continue
+    mode="$(nmcli -t -f 802-11-wireless.mode connection show "$name" 2>/dev/null | cut -d: -f2-)"
+    ifn="$(nmcli -t -f connection.interface-name connection show "$name" 2>/dev/null | cut -d: -f2-)"
+    [[ "$mode" == "infrastructure" && -z "$ifn" ]] || continue
+    log "  '$name' -> $WLAN_IFACE"
+    nmcli connection modify "$name" connection.interface-name "$WLAN_IFACE"
+done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless"{print $1}')
+
+# 3. Regdomain (do_wifi_country writes wpa_supplicant.conf, harmless if NM-managed)
 log "setting country=$COUNTRY"
 raspi-config nonint do_wifi_country "$COUNTRY" 2>/dev/null || true
 iw reg set "$COUNTRY" 2>/dev/null || true
 
-# 3. Tell NM to manage uap0 before creating it
+# 4. Tell NM to manage uap0 before creating it
 NM_CONF="/etc/NetworkManager/conf.d/10-${UAP_IFACE}.conf"
+
+# Stale duplicates from earlier hand-setup: a second copy of this config is
+# never wanted, and an indented section header makes the whole drop-in
+# invalid to NM's parser.
+for stale in /etc/NetworkManager/conf.d/*"${UAP_IFACE}"*.conf; do
+    [[ -e "$stale" && "$stale" != "$NM_CONF" ]] || continue
+    log "removing stale drop-in $stale"
+    rm -f "$stale"
+    RELOAD_NM=1
+done
+
 if [[ ! -f "$NM_CONF" ]]; then
     log "writing $NM_CONF"
     cat > "$NM_CONF" <<EOF
@@ -91,10 +119,11 @@ if [[ ! -f "$NM_CONF" ]]; then
 match-device=interface-name:${UAP_IFACE}
 managed=true
 EOF
-    systemctl reload NetworkManager
+    RELOAD_NM=1
 fi
+[[ -n "${RELOAD_NM:-}" ]] && systemctl reload NetworkManager
 
-# 4. systemd unit so uap0 is recreated at boot
+# 5. systemd unit so uap0 is recreated at boot
 UNIT="/etc/systemd/system/${UAP_IFACE}.service"
 if [[ ! -f "$UNIT" ]]; then
     log "writing $UNIT"
@@ -119,14 +148,20 @@ EOF
     systemctl enable "${UAP_IFACE}.service"
 fi
 
-# 5. Ensure uap0 exists right now (start the unit; tolerate "already exists")
+# 6. Ensure uap0 exists right now.
+#
+# restart, not start: the unit is RemainAfterExit=yes, so once NM has torn the
+# interface down behind its back systemd still reports it active and `start`
+# is a no-op returning 0 — the fallback never fires and `ip link set` then
+# fails with "Cannot find device".
 if ! ip link show "$UAP_IFACE" >/dev/null 2>&1; then
     log "creating $UAP_IFACE"
-    systemctl start "${UAP_IFACE}.service" || iw dev "$WLAN_IFACE" interface add "$UAP_IFACE" type __ap
+    systemctl restart "${UAP_IFACE}.service" \
+        || iw dev "$WLAN_IFACE" interface add "$UAP_IFACE" type __ap
     ip link set "$UAP_IFACE" up
 fi
 
-# 6. Read STA channel — AP must match (single-channel concurrency on bcm43455)
+# 7. Read STA channel — AP must match (single-channel concurrency on bcm43455)
 STA_CHAN="$(iw dev "$WLAN_IFACE" info 2>/dev/null | awk '/channel/ {print $2; exit}' || true)"
 if [[ -z "${STA_CHAN}" ]]; then
     log "warning: $WLAN_IFACE not on a channel yet — AP will pick at activation time"
@@ -142,7 +177,7 @@ else
     CHAN_ARG=(802-11-wireless.channel "$STA_CHAN")
 fi
 
-# 7. Create or update the AP connection
+# 8. Create or update the AP connection
 if nmcli -t -f NAME connection show | grep -Fxq "$CON_NAME"; then
     log "updating existing connection '$CON_NAME'"
 else
@@ -169,12 +204,12 @@ nmcli connection modify "$CON_NAME" \
     802-11-wireless-security.pairwise ccmp \
     802-11-wireless-security.group ccmp
 
-# 8. (Re)activate
+# 9. (Re)activate
 log "activating '$CON_NAME'"
 nmcli connection down "$CON_NAME" 2>/dev/null || true
 nmcli connection up "$CON_NAME"
 
-# 9. Status
+# 10. Status
 log "interfaces:"
 nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status \
     | awk -F: -v w="$WLAN_IFACE" -v u="$UAP_IFACE" '$1==w || $1==u {print "  " $0}'
