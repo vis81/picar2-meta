@@ -320,21 +320,39 @@ class ModeStack:
         self.phase = "mapping"
 
     def _nurse_explore(self, link: "RobotLink"):
-        """explore_lite gives up permanently on its first empty frontier search.
-        For the first minute, nudge it back if it does that while the map is
-        still growing — a genuine 'complete' only counts once the map is
-        stable."""
-        deadline = time.monotonic() + 60.0
+        """explore_lite gives up permanently the first time a frontier search
+        comes back empty, and that happens for transient reasons too — most
+        often the global costmap mid-resize as the map grows, which briefly
+        leaves no FREE_SPACE for nearestCell() to find.
+
+        So supervise for the whole session, not just the opening seconds: any
+        'complete' while the map is still growing is treated as a stall and
+        resumed. Only a complete on a map that has stopped changing for
+        STABLE_S is taken at face value."""
+        STABLE_S = 45.0
+        POLL_S = 5.0
         last_seq = -1
-        while time.monotonic() < deadline and not self._abort.is_set():
-            time.sleep(5.0)
+        last_change = time.monotonic()
+
+        while not self._abort.is_set():
+            time.sleep(POLL_S)
             if not self.running("explore"):
                 return
+
             _, seq = link.map_snapshot()
-            growing = seq != last_seq
-            last_seq = seq
-            if link.explore_status == ExploreStatus.EXPLORATION_COMPLETE and growing:
+            if seq != last_seq:
+                last_seq = seq
+                last_change = time.monotonic()
+
+            if link.explore_status != ExploreStatus.EXPLORATION_COMPLETE:
+                continue
+
+            stable_for = time.monotonic() - last_change
+            if stable_for < STABLE_S:
+                self.phase = f"nudging explore (map grew {stable_for:.0f}s ago)"
                 link.resume_explore()
+            else:
+                self.phase = "explored — map stable"
 
     def set_explore(self, on: bool):
         with self._lock:
