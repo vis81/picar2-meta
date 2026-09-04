@@ -75,6 +75,35 @@ ROS_SETUP_PC := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
                 source /opt/ros/jazzy/setup.bash && \
                 source $(WS_PATH)/$(INSTALL_BASE)/setup.bash
 
+# ── Navigation benchmark ─────────────────────────────────────────────────────
+# Variables first: BENCH_SETUP is := (immediate), so anything it references has
+# to exist already. Comments go on their own lines — a trailing comment leaves
+# its preceding whitespace in the value, which then reaches the command line.
+BENCH_DOMAIN ?= 42
+# open_straight | doorway | dead_end_reverse
+SCENARIO     ?= open_straight
+# ground_truth | slam | amcl   (only ground_truth has been validated)
+BENCH_MODE   ?= ground_truth
+# config name from picar2_benchmark/configs, e.g. mppi_ackermann
+OVERLAY      ?=
+# 0.0 removes all simulated sensor noise
+NOISE        ?= 1.0
+RUNS         ?= 1
+BENCH_OUT    ?= /tmp/picar2_bench/results
+
+# Deliberately NOT ROS_SETUP: the benchmark runs on its own DDS domain with no
+# cyclonedds.xml, so a sim on this machine can never talk to the robot or to a
+# second benchmark run.
+BENCH_SETUP  := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
+                unset CYCLONEDDS_URI && \
+                export ROS_DOMAIN_ID=$(BENCH_DOMAIN) && \
+                source /opt/ros/jazzy/setup.bash && \
+                source $(WS_PATH)/$(INSTALL_BASE)/setup.bash
+
+_BENCH_SHARE := $(WS_PATH)/$(INSTALL_BASE)/picar2_benchmark/share/picar2_benchmark
+_SCENARIO_YML := $(_BENCH_SHARE)/scenarios/$(SCENARIO).yaml
+_OVERLAY_ARG := $(if $(OVERLAY),--overlay $(_BENCH_SHARE)/configs/$(OVERLAY).yaml,)
+
 # ── docker-start flags ───────────────────────────────────────────────────────
 # gpio group name is not in the ROS base image — resolve its GID from
 # /dev/gpiomem on the host at make time. Same idea for the `input` group
@@ -116,7 +145,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
@@ -265,6 +294,44 @@ explore:
 
 explore-sim:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup explore.launch.py use_sim_time:=true"
+
+# Run one measured navigation trial. Trials are serial by design: two sims on
+# one machine contend for CPU, which silently becomes an uncontrolled variable.
+#   make bench SCENARIO=dead_end_reverse
+#   make bench SCENARIO=doorway BENCH_MODE=slam
+#   make bench SCENARIO=dead_end_reverse OVERLAY=mppi_ackermann RUNS=4
+bench:
+	$(CMD) "$(BENCH_SETUP) && for i in \$$(seq 1 $(RUNS)); do \
+	  echo \"--- $(SCENARIO) [$(BENCH_MODE)] run \$$i/$(RUNS)\" && \
+	  ros2 run picar2_benchmark bench-run $(_SCENARIO_YML) \
+	    --mode $(BENCH_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) \
+	    -o $(BENCH_OUT); done"
+
+# Leave the stack up afterwards so RViz/Gazebo can be attached.
+bench-keep:
+	$(CMD) "$(BENCH_SETUP) && ros2 run picar2_benchmark bench-run $(_SCENARIO_YML) \
+	  --mode $(BENCH_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) \
+	  -o $(BENCH_OUT) --keep-up"
+
+# Write a scenario's world and static map without running anything.
+bench-gen:
+	$(CMD) "$(BENCH_SETUP) && ros2 run picar2_benchmark bench-generate $(_SCENARIO_YML) \
+	  -o /tmp/picar2_bench"
+
+# Summarise trials: median + IQR + range, outcomes as a distribution.
+#   make bench-report GROUP_BY=config
+GROUP_BY ?= config
+
+bench-report:
+	$(CMD) "$(BENCH_SETUP) && ros2 run picar2_benchmark bench-report $(BENCH_OUT) \
+	  --group-by $(GROUP_BY)"
+
+# Attach viewers to a `make bench-keep` session.
+bench-gui:
+	$(CMD) "$(BENCH_SETUP) && gz sim -g"
+
+bench-rviz:
+	$(CMD) "$(BENCH_SETUP) && rviz2 -d $(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config/rviz.rviz --ros-args -p use_sim_time:=true"
 
 teleop:
 	$(CMD) "$(ROS_SETUP) && ros2 run teleop_twist_keyboard teleop_twist_keyboard"
