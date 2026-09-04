@@ -86,6 +86,8 @@ SCENARIO     ?= open_straight
 BENCH_MODE   ?= ground_truth
 # config name from picar2_benchmark/configs, e.g. mppi_ackermann
 OVERLAY      ?=
+# behaviour tree variant: nav_to_pose_ackermann (default) | speed | distance
+BT           ?=
 # 0.0 removes all simulated sensor noise
 NOISE        ?= 1.0
 RUNS         ?= 1
@@ -103,6 +105,8 @@ BENCH_SETUP  := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
 _BENCH_SHARE := $(WS_PATH)/$(INSTALL_BASE)/picar2_benchmark/share/picar2_benchmark
 _SCENARIO_YML := $(_BENCH_SHARE)/scenarios/$(SCENARIO).yaml
 _OVERLAY_ARG := $(if $(OVERLAY),--overlay $(_BENCH_SHARE)/configs/$(OVERLAY).yaml,)
+_BRINGUP_CFG := $(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config
+_BT_ARG      := $(if $(BT),--bt $(_BRINGUP_CFG)/nav_to_pose_$(BT).xml,)
 
 # ── docker-start flags ───────────────────────────────────────────────────────
 # gpio group name is not in the ROS base image — resolve its GID from
@@ -304,7 +308,7 @@ bench:
 	$(CMD) "$(BENCH_SETUP) && for i in \$$(seq 1 $(RUNS)); do \
 	  echo \"--- $(SCENARIO) [$(BENCH_MODE)] run \$$i/$(RUNS)\" && \
 	  ros2 run picar2_benchmark bench-run $(_SCENARIO_YML) \
-	    --mode $(BENCH_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) \
+	    --mode $(BENCH_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) $(_BT_ARG) \
 	    -o $(BENCH_OUT); done"
 
 # Leave the stack up afterwards so RViz/Gazebo can be attached.
