@@ -35,10 +35,13 @@ repositories:
     type: git
     url: https://github.com/vis81/tof_imager_ros.git
     version: master
+  # Fork carrying one commit on upstream jazzy-devel: the catkin -> ament_cmake
+  # port of the five world packages, which upstream still ships as ROS1 with
+  # COLCON_IGNORE files.
   robotnik_gazebo_worlds:
     type: git
-    url: https://github.com/RobotnikAutomation/robotnik_gazebo_worlds.git
-    version: jazzy-devel
+    url: https://github.com/vis81/robotnik_gazebo_worlds.git
+    version: picar2/jazzy-devel
   vizanti:
     type: git
     url: https://github.com/vis81/vizanti.git

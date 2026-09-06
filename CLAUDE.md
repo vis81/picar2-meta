@@ -28,7 +28,7 @@ picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, 
     vizanti/                  ← web mission planner (external, forked)
     explore_lite/             ← frontier exploration (external)
     imu_calib/                ← accel/gyro calibration (external)
-    robotnik_gazebo_worlds/   ← sim worlds (external)
+    robotnik_gazebo_worlds/   ← sim worlds (our fork: catkin→ament port)
   maps/                       ← saved maps (pbstream / posegraph / pgm+yaml)
 ```
 
