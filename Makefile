@@ -41,6 +41,11 @@ JOY_CONFIG ?= ps4
 # host: run commands directly (ROS must be installed and sourced on the host)
 # docker: wrap each command in an appropriate Docker container
 EXEC_ENV       ?= host      # host | docker
+# nav2 fork carrying the Smac analytic-expansion fix (docs/nav2-smac-right-turn.md).
+# The branch also COLCON_IGNOREs every package but nav2_smac_planner, so a plain
+# checkout builds just the one plugin as an overlay.
+NAV2_FORK      ?= https://github.com/vis81/navigation2.git
+NAV2_BRANCH    ?= picar2/1.3.12
 CONTAINER_NAME ?= picar2   # persistent container name for docker-start / docker-stop
 
 # ── Path and build directories (differ inside docker vs. on host) ────────────
@@ -183,6 +188,18 @@ docker-stop:
 # ── Build & source management ────────────────────────────────────────────────
 deps:
 	bash -c "mkdir -p $(WS)/src && vcs import $(WS)/src < $(WS)/.repos && touch $(WS)/src/yahboom/COLCON_IGNORE"
+
+# Fetch the nav2 fork on its own. make deps already does this through .repos;
+# this target is for the Pi, where sync2pi skips src/navigation2 so the robot
+# clones it itself. Plain git on the host — needs no ROS and no container, so
+# it is deliberately not routed through $(CMD).
+nav2-overlay:
+	bash -c "if [ -d $(WS)/src/navigation2/.git ]; then \
+	    git -C $(WS)/src/navigation2 fetch --depth 1 origin $(NAV2_BRANCH) && \
+	    git -C $(WS)/src/navigation2 checkout -B $(NAV2_BRANCH) FETCH_HEAD; \
+	  else \
+	    git clone --depth 1 --branch $(NAV2_BRANCH) $(NAV2_FORK) $(WS)/src/navigation2; \
+	  fi"
 
 ifeq ($(FORCE),)
 pull:
@@ -434,6 +451,7 @@ docker-shell:
 sync2pi:
 	rsync -avz --exclude '.git' --exclude 'build' --exclude 'install' --exclude 'log' \
 		--exclude 'build-docker' --exclude 'install-docker' --exclude 'setenv.sh' \
+		--exclude 'src/navigation2' \
 		. pi@$(PI_IP):~/picar_ws/
 
 # ── SoftAP (host-only — configures NetworkManager on the Pi, not in container) ─

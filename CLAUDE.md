@@ -221,6 +221,16 @@ Nav2 is configured for a car-like robot that **cannot spin in place**:
 - Costmaps: explicit rectangular `footprint` (base_footprint sits at the rear
   axle, chassis extends 40 mm behind it); obstacle sources are `/lidar_node/scan`
   and `/sen0628/pointcloud`.
+- **Right turns need the patched Smac overlay.** Upstream's analytic-expansion
+  scoring extrapolates one sample gap across the whole expansion; that gap
+  collapses across a cusp, so a path starting with a reversal scores at a
+  fraction of its true length and wins. Every right-hand turn cusped as a
+  result (`corner_right`: 105 direction reversals vs `corner_left`'s 0).
+  `.repos` points at our fork (`vis81/navigation2`, branch `picar2/1.3.12`),
+  which carries the fix plus a `COLCON_IGNORE` in every other package, so only
+  `nav2_smac_planner` is built and one branch covers the PC's nav2 1.3.12 and
+  the Pi's 1.3.11. `make nav2-overlay` fetches it standalone (the Pi needs
+  this — `sync2pi` skips it). See `docs/nav2-smac-right-turn.md`.
 - `rcl_yaml_param_parser` does **not** support YAML anchors — an attempt to
   deduplicate the costmap blocks with them was reverted.
 
