@@ -100,6 +100,12 @@ class RobotLink(Node):
         # _drive_tick stays the only timer.
         self._nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._goal_handle = None
+        # Each goal carries a sequence number so late callbacks from a
+        # superseded one cannot clobber the current goal's state, and a
+        # cancel arriving before the server has accepted is remembered
+        # rather than dropped.
+        self._goal_seq = 0
+        self._cancel_pending = False
         self.nav_state = "idle"
         self.nav_goal = None
         self.nav_distance = None
@@ -302,15 +308,20 @@ class RobotLink(Node):
 
         # Set before sending so /api/status shows the intent immediately,
         # rather than a half-second of looking like nothing happened.
+        self._goal_seq += 1
+        seq = self._goal_seq
+        self._cancel_pending = False
         self.nav_state = "pending"
         self.nav_goal = {"x": float(x), "y": float(y), "yaw": float(yaw)}
         self.nav_distance = None
-        fut = self._nav.send_goal_async(goal,
-                                        feedback_callback=self._on_nav_feedback)
-        fut.add_done_callback(self._on_nav_accepted)
+        fut = self._nav.send_goal_async(
+            goal, feedback_callback=lambda m: self._on_nav_feedback(m, seq))
+        fut.add_done_callback(lambda f: self._on_nav_accepted(f, seq))
         return True, ""
 
-    def _on_nav_accepted(self, fut):
+    def _on_nav_accepted(self, fut, seq):
+        if seq != self._goal_seq:
+            return                      # a newer goal has taken over
         try:
             gh = fut.result()
         except Exception:
@@ -322,12 +333,25 @@ class RobotLink(Node):
             return
         self._goal_handle = gh
         self.nav_state = "active"
-        gh.get_result_async().add_done_callback(self._on_nav_result)
+        gh.get_result_async().add_done_callback(
+            lambda f: self._on_nav_result(f, seq))
+        # Someone grabbed the joystick while we were waiting to be accepted.
+        # Without this the cancel is lost and Nav2 starts driving into a
+        # /cmd_vel stream the human thinks they own.
+        if self._cancel_pending:
+            self.cancel_goal()
 
-    def _on_nav_feedback(self, msg):
+    def _on_nav_feedback(self, msg, seq):
+        if seq != self._goal_seq:
+            return
         self.nav_distance = float(msg.feedback.distance_remaining)
 
-    def _on_nav_result(self, fut):
+    def _on_nav_result(self, fut, seq):
+        if seq != self._goal_seq:
+            # A preempted goal reports ABORTED after the new one was
+            # accepted; letting that through would show "could not get
+            # there" while the robot drives, and drop the live handle.
+            return
         # Read the status, not the result fields: the installed nav2_msgs is
         # the packaged one, and NavigateToPose.Result has drifted across
         # releases, while GoalStatus has not.
@@ -343,9 +367,16 @@ class RobotLink(Node):
         self.nav_distance = None
 
     def cancel_goal(self):
-        """Idempotent — a no-op when nothing is running."""
+        """Idempotent, and safe before the goal has been accepted."""
+        if self.nav_state in ("idle", "succeeded", "aborted",
+                              "canceled", "rejected"):
+            return
+        self._cancel_pending = True
         gh = self._goal_handle
         if gh is None:
+            # Still waiting to be accepted — there is nothing to cancel yet,
+            # so record it and let _on_nav_accepted do it on arrival.
+            self.nav_state = "canceling"
             return
         self.nav_state = "canceling"
         try:
@@ -359,6 +390,8 @@ class RobotLink(Node):
 
     def forget_nav(self):
         self.cancel_goal()
+        self._goal_seq += 1             # orphan any callback still in flight
+        self._cancel_pending = False
         self._goal_handle = None
         self.nav_state = "idle"
         self.nav_goal = None
@@ -447,6 +480,10 @@ class ModeStack:
         # Output goes to a file, never DEVNULL: a launch that dies on startup
         # is the most likely failure here, and discarding stderr makes it
         # invisible from the phone.
+        # Overwriting a live handle would orphan its process group beyond
+        # any hope of killing it, so never launch over one.
+        if self.running(name):
+            self._stop(name)
         cmd = ["ros2", "launch", "picar2_bringup", launch_file]
         cmd += [f"{k}:={v}" for k, v in (args or {}).items()]
         log = open(self.log_path(name), "wb")
@@ -567,7 +604,11 @@ class ModeStack:
                      map_yaml: str, map_name: str):
         """Caller holds _busy."""
         self.phase = "switching to localize"
-        self._teardown({"explore", "nav2", "cartographer"})
+        # amcl is in the set because "Change map" re-enters here while AMCL
+        # is already up. Without it the second launch overwrites the handle
+        # in _procs, the first process group becomes unkillable, and two
+        # map_server/amcl sets broadcast map→odom at once.
+        self._teardown({"explore", "nav2", "cartographer", "amcl"})
         if not self._current(gen):
             return
         link.forget_map()
@@ -871,7 +912,12 @@ def save_map(ws: str, name: str) -> tuple[bool, str]:
         ),
     ]
     for cmd, label in steps:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return False, f"{label} timed out — is cartographer still up?"
+        except OSError as e:
+            return False, f"{label} could not run: {e}"
         if r.returncode != 0:
             return False, f"{label} failed: {r.stderr.strip()[:200]}"
     return True, base
@@ -929,6 +975,15 @@ def list_maps(ws: str) -> list[dict]:
 def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     app = Flask(__name__, static_folder=None)
 
+    def body() -> dict:
+        """request.json is whatever was sent — a bare string or list would
+        make .get() raise and turn a bad request into a 500."""
+        try:
+            b = request.get_json(silent=True)
+        except Exception:
+            b = None
+        return b if isinstance(b, dict) else {}
+
     @app.route("/")
     def index():
         return send_from_directory(root, "index.html")
@@ -979,14 +1034,14 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/mode", methods=["POST"])
     def set_mode():
-        body = request.json or {}
-        mode = body.get("mode", "idle")
+        b = body()
+        mode = b.get("mode", "idle")
         if mode not in ("idle", "mapping", "localize"):
             return jsonify({"ok": False, "error": f"unknown mode {mode!r}"}), 400
 
         map_yaml = map_name = None
         if mode == "localize":
-            map_name = (body.get("map") or "").strip()
+            map_name = (b.get("map") or "").strip()
             if not map_name or "/" in map_name or map_name.startswith("."):
                 return jsonify({"ok": False, "error": "bad map name"}), 400
             map_yaml = os.path.join(ws, "maps", map_name + ".yaml")
@@ -1013,9 +1068,9 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         if modes.mode != "localize":
             return jsonify({"ok": False,
                             "error": "only in localize mode"}), 409
-        body = request.json or {}
+        b = body()
         try:
-            x = float(body["x"]); y = float(body["y"]); yaw = float(body["yaw"])
+            x = float(b["x"]); y = float(b["y"]); yaw = float(b["yaw"])
         except (KeyError, TypeError, ValueError):
             return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
 
@@ -1032,9 +1087,9 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         if modes.mode != "localize":
             return jsonify({"ok": False,
                             "error": "only in localize mode"}), 409
-        body = request.json or {}
+        b = body()
         try:
-            x = float(body["x"]); y = float(body["y"]); yaw = float(body["yaw"])
+            x = float(b["x"]); y = float(b["y"]); yaw = float(b["yaw"])
         except (KeyError, TypeError, ValueError):
             return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
         if link.pose() is None:
@@ -1072,7 +1127,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/explore", methods=["POST"])
     def explore():
-        on = bool((request.json or {}).get("on", False))
+        on = bool(body().get("on", False))
         if not on:
             modes.stop_explore()
             return jsonify({"ok": True})
@@ -1087,9 +1142,16 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/mapping/save", methods=["POST"])
     def mapping_save():
-        name = (request.json or {}).get("name", "").strip()
+        name = str(body().get("name", "")).strip()
         if not name or "/" in name or name.startswith("."):
             return jsonify({"ok": False, "error": "bad map name"}), 400
+        if modes.mode != "mapping":
+            return jsonify({"ok": False, "error": "only while mapping"}), 409
+        if not modes.running("cartographer") or not link.has_map():
+            # finish_trajectory would block until its 120 s timeout, which
+            # surfaces as a raw 500 the client cannot parse.
+            return jsonify({"ok": False,
+                            "error": "cartographer isn't mapping"}), 409
 
         # Stop exploring first so the robot is still while the graph is sealed.
         modes.stop_explore()
@@ -1147,9 +1209,12 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/drive", methods=["POST"])
     def drive():
-        body = request.json or {}
-        link.set_drive(float(body.get("linear", 0.0)),
-                       float(body.get("angular", 0.0)))
+        b = body()
+        try:
+            link.set_drive(float(b.get("linear", 0.0)),
+                           float(b.get("angular", 0.0)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "linear and angular must be numbers"}), 400
         return ("", 204)
 
     return app

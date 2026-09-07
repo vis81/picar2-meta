@@ -324,6 +324,10 @@ const post = (url, body) => fetch(url, {
 function setMode(m, map) {
   const hint = $('hint');
   hint.dataset.showing = '';
+  // Otherwise an armed gesture outlives the mode: its button is hidden but
+  // every single-finger tap still places instead of panning, with nothing
+  // on screen to explain why the map stopped moving.
+  armed = null; drag = null;
   if (m === 'mapping') {
     hint.classList.remove('hidden');
     hint.textContent = 'Starting cartographer — the stick works as soon as the map appears.';
@@ -563,9 +567,11 @@ function dragYaw() {
 }
 
 async function commitDrag() {
+  if (!mapData) return;
   const m = gridToMetres(drag.a);
   const body = { x: m.x, y: m.y, yaw: dragYaw() };
-  const url = armed === 'goal' ? '/api/goal' : '/api/initialpose';
+  const isGoal = armed === 'goal';
+  const url = isGoal ? '/api/goal' : '/api/initialpose';
   const hint = $('hint');
   hint.dataset.showing = '';
   try {
@@ -573,8 +579,8 @@ async function commitDrag() {
     if (!r.ok) {
       hint.classList.remove('hidden');
       hint.textContent = r.error ||
-        (armed === 'goal' ? 'Could not send the goal.'
-                          : 'Could not set the position.');
+        (isGoal ? 'Could not send the goal.'
+                : 'Could not set the position.');
     } else {
       hint.classList.add('hidden');
     }
