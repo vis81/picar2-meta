@@ -23,6 +23,8 @@ let mapName = null;        // localize: which saved map is loaded
 let localized = false;
 let maps = [];             // saved maps, for the picker
 let lastSaved = null;      // preselect what you just saved when localizing
+let armed = null;          // null | 'pose' — a map tap is being awaited
+let drag = null;           // {a, p} in grid cells while placing
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -110,9 +112,46 @@ function draw() {
       ctx.lineWidth = 1.5 / view.scale;
       ctx.strokeStyle = '#06101f';
       ctx.stroke();
+      ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
     }
+
+    if (drag) drawPlacement();
   }
   requestAnimationFrame(draw);
+}
+
+// Live preview of where the robot is being placed: a ring at the touch
+// point and an arrow towards the drag, so the heading that gets sent is
+// the one on screen.
+function drawPlacement() {
+  const r = Math.max(8 / view.scale, 5);
+  const col = '#ffb74d';
+  ctx.beginPath();
+  ctx.arc(drag.a.gx, drag.a.gy, r, 0, Math.PI * 2);
+  ctx.lineWidth = 2 / view.scale;
+  ctx.strokeStyle = col;
+  ctx.stroke();
+
+  const yaw = dragYaw();
+  const len = Math.max(r * 3, Math.hypot(drag.p.gx - drag.a.gx,
+                                         drag.p.gy - drag.a.gy));
+  const ex = drag.a.gx + Math.cos(yaw) * len;
+  const ey = drag.a.gy - Math.sin(yaw) * len;
+  ctx.beginPath();
+  ctx.moveTo(drag.a.gx, drag.a.gy);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(ex, ey);
+  ctx.rotate(-yaw);
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.lineTo(-r * 0.6, r * 0.6);
+  ctx.lineTo(-r * 0.6, -r * 0.6);
+  ctx.closePath();
+  ctx.fillStyle = col;
+  ctx.fill();
+  ctx.restore();
 }
 
 function resize() {
@@ -202,6 +241,7 @@ function renderControls() {
   $('explore').classList.toggle('hidden', !mapping);
   $('save').classList.toggle('hidden', !mapping);
   $('setpose').classList.toggle('hidden', !loc);
+  $('setpose').classList.toggle('armed', armed === 'pose');
   $('changemap').classList.toggle('hidden', !loc);
   // Manual driving is available in both modes.
   $('stick').classList.toggle('hidden', mode === 'idle');
@@ -268,6 +308,19 @@ $('m-map').onclick = () => {
 // actually switches.
 $('m-loc').onclick = () => openMapPicker();
 $('changemap').onclick = () => openMapPicker();
+
+$('setpose').onclick = () => {
+  armed = armed === 'pose' ? null : 'pose';
+  const hint = $('hint');
+  hint.dataset.showing = '';
+  if (armed) {
+    hint.classList.remove('hidden');
+    hint.textContent = 'Tap where the robot is — drag to point the way it faces.';
+  } else {
+    hint.classList.add('hidden');
+  }
+  renderControls();
+};
 $('cancel-load').onclick = () => $('mapsheet').classList.add('hidden');
 
 function openMapPicker() {
@@ -394,7 +447,28 @@ stick.addEventListener('touchcancel', stickEnd);
 // ── map pan / pinch ───────────────────────────────────────────────────
 
 let pan = null, pinch = null;
+// Screen point → grid cell, the exact inverse of the pose overlay in draw().
+function toGrid(t) {
+  const dpr = canvas.width / window.innerWidth;
+  return { gx: (t.clientX * dpr - view.tx) / view.scale,
+           gy: (t.clientY * dpr - view.ty) / view.scale };
+}
+
+function gridToMetres(g) {
+  return { x: g.gx * mapData.res + mapData.ox,
+           y: (mapData.h - g.gy) * mapData.res + mapData.oy };
+}
+
 canvas.addEventListener('touchstart', (e) => {
+  // While armed the map does not pan — that is what separates "place the
+  // robot here" from an ordinary drag, with no timing or distance guess
+  // that could fire a goal by accident.
+  if (armed && e.touches.length === 1 && mapData) {
+    const g = toGrid(e.touches[0]);
+    drag = { a: g, p: g };
+    pan = null;
+    return;
+  }
   if (e.touches.length === 1) {
     pan = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   } else if (e.touches.length === 2) {
@@ -405,6 +479,13 @@ canvas.addEventListener('touchstart', (e) => {
 
 canvas.addEventListener('touchmove', (e) => {
   const dpr = canvas.width / window.innerWidth;
+  if (drag) {
+    // A second finger means they meant to zoom — abandon the placement
+    // rather than sending somewhere they only half-chose.
+    if (e.touches.length > 1) { drag = null; pinch = touchDist(e) / view.scale; return; }
+    drag.p = toGrid(e.touches[0]);
+    return;
+  }
   if (e.touches.length === 1 && pan) {
     view.tx += (e.touches[0].clientX - pan.x) * dpr;
     view.ty += (e.touches[0].clientY - pan.y) * dpr;
@@ -414,7 +495,38 @@ canvas.addEventListener('touchmove', (e) => {
   }
 }, { passive: true });
 
-canvas.addEventListener('touchend', () => { pan = null; pinch = null; });
+canvas.addEventListener('touchend', () => {
+  if (drag) { commitDrag(); drag = null; armed = null; renderControls(); }
+  pan = null; pinch = null;
+});
+
+function dragYaw() {
+  const dx = drag.p.gx - drag.a.gx, dy = drag.p.gy - drag.a.gy;
+  // Below about 10 screen pixels the direction is noise, so keep the
+  // robot's current heading. The preview arrow shows whichever applies,
+  // so what you see is what gets sent.
+  if (Math.hypot(dx, dy) * view.scale < 10) return pose ? pose.yaw : 0;
+  return Math.atan2(-dy, dx);          // screen y grows downward
+}
+
+async function commitDrag() {
+  const m = gridToMetres(drag.a);
+  const body = { x: m.x, y: m.y, yaw: dragYaw() };
+  const hint = $('hint');
+  hint.dataset.showing = '';
+  try {
+    const r = await (await post('/api/initialpose', body)).json();
+    if (!r.ok) {
+      hint.classList.remove('hidden');
+      hint.textContent = r.error || 'Could not set the position.';
+    } else {
+      hint.classList.add('hidden');
+    }
+  } catch (err) {
+    hint.classList.remove('hidden');
+    hint.textContent = 'Could not set the position: ' + err;
+  }
+}
 
 function touchDist(e) {
   return Math.hypot(

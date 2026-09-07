@@ -35,8 +35,9 @@ import time
 import rclpy
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from explore_lite_msgs.msg import ExploreStatus
+from nav2_msgs.srv import SetInitialPose
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
 from rclpy.node import Node
@@ -80,6 +81,14 @@ class RobotLink(Node):
         # At startup that happens routinely, before the global costmap has
         # copied the map in — resume puts it back to work.
         self._resume_pub = self.create_publisher(Bool, "/explore/resume", 10)
+        # AMCL takes an initial pose two ways. Prefer the service: it is
+        # acknowledged, whereas the topic subscription is volatile, so a
+        # message published before discovery finishes is dropped with no
+        # error at all — the most confusing failure the user could hit.
+        self._initpose_cli = self.create_client(
+            SetInitialPose, "/set_initial_pose")
+        self._initpose_pub = self.create_publisher(
+            PoseWithCovarianceStamped, "/initialpose", 10)
         self.create_subscription(
             ExploreStatus, "/explore/status", self._on_explore_status, 10)
         self.explore_status = None
@@ -217,6 +226,48 @@ class RobotLink(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z),
         )
         return {"x": t.x, "y": t.y, "yaw": yaw}
+
+    # ── initial pose ─────────────────────────────────────────────────────
+    def set_initial_pose(self, x: float, y: float, yaw: float):
+        """Tell AMCL where the robot is. Returns (ok, message)."""
+        msg = PoseWithCovarianceStamped()
+        # AMCL rejects an initial pose in any other frame.
+        msg.header.frame_id = "map"
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        # RViz's "2D Pose Estimate" covariance: half a metre and ~15° of
+        # doubt, which is about how well anyone can tap a map.
+        cov = [0.0] * 36
+        cov[0] = 0.25
+        cov[7] = 0.25
+        cov[35] = 0.06853891945200942
+        msg.pose.covariance = cov
+
+        if not self._initpose_cli.wait_for_service(timeout_sec=2.0):
+            return False, "AMCL isn't running yet"
+
+        done = threading.Event()
+        fut = self._initpose_cli.call_async(SetInitialPose.Request(pose=msg))
+        fut.add_done_callback(lambda _f: done.set())
+        # Never spin here — the node has its own spin thread, and spinning
+        # from the request thread would run callbacks on two threads at once.
+        done.wait(timeout=3.0)
+        # Belt and braces: the topic is idempotent for AMCL and covers the
+        # case where the service exists but the call was slow.
+        self._initpose_pub.publish(msg)
+
+        # AMCL withholds map→odom until it believes it knows where it is, so
+        # a pose appearing is positive proof it accepted this one. Without
+        # the check a pose outside the map is discarded in silence.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if self.pose() is not None:
+                return True, ""
+            time.sleep(0.1)
+        return False, "AMCL took the pose but published no transform"
 
     # ── drive ────────────────────────────────────────────────────────────
     def set_drive(self, linear: float, angular: float):
@@ -494,7 +545,23 @@ class ModeStack:
 
         if self._current(gen):
             self.phase = self._diagnose_no_map()
+            # Cartographer is still running and the wedge does clear itself
+            # once wall time passes the bogus stamp, so the map can still
+            # turn up minutes later. Leaving a failure on screen after it
+            # does is worse than the failure.
+            threading.Thread(target=self._watch_late_map,
+                             args=(link, gen), daemon=True).start()
         return False
+
+    def _watch_late_map(self, link: "RobotLink", gen: int):
+        deadline = time.monotonic() + 900.0
+        while time.monotonic() < deadline:
+            time.sleep(2.0)
+            if not self._current(gen) or self.mode != "mapping":
+                return
+            if link.has_map():
+                self.phase = "mapping"
+                return
 
     def _diagnose_no_map(self) -> str:
         """Say why no map arrived, rather than just that none did.
@@ -779,6 +846,25 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             daemon=True,
         ).start()
         return jsonify({"ok": True}), 202
+
+    @app.route("/api/initialpose", methods=["POST"])
+    def initial_pose():
+        if modes.mode != "localize":
+            return jsonify({"ok": False,
+                            "error": "only in localize mode"}), 409
+        body = request.json or {}
+        try:
+            x = float(body["x"]); y = float(body["y"]); yaw = float(body["yaw"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
+
+        ok, err = link.set_initial_pose(x, y, yaw)
+        if ok:
+            modes.phase = "localized"
+            return jsonify({"ok": True})
+        # 503 if AMCL is not there yet, 504 if it is but did not take it.
+        code = 503 if "isn't running" in err else 504
+        return jsonify({"ok": False, "error": err}), code
 
     @app.route("/api/explore", methods=["POST"])
     def explore():
