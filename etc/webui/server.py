@@ -93,6 +93,7 @@ class RobotLink(Node):
         self._drive_stamp = 0.0
         self._drive_was_active = False
         self.pose_error = "no lookup yet"
+        self._tf_valid_from = 0.0
 
         self.create_timer(1.0 / DRIVE_RATE_HZ, self._drive_tick)
 
@@ -139,17 +140,20 @@ class RobotLink(Node):
         self.explore_status = None
 
     def forget_tf(self):
-        """Clear the transform buffer.
+        """Treat transforms older than now as belonging to the previous mode.
 
-        pose() looks up the latest available transform, and tf2 keeps ten
+        pose() looks up the latest available transform and tf2 keeps ten
         seconds of history, so a dead cartographer's last map→odom stays
-        lookup-able well after the process is gone. Anything gating on "is
-        there a pose yet" would pass on that ghost.
+        lookup-able well after the process is gone, and anything gating on
+        "is there a pose yet" would pass on that ghost.
+
+        This marks a cutoff rather than calling Buffer.clear(), because the
+        buffer also holds /tf_static — the robot's own links, published once
+        at bringup with transient-local durability. Clearing drops them, and
+        an already-subscribed listener gets no replay, so the whole chain
+        below odom would be gone for good.
         """
-        try:
-            self._tf_buffer.clear()
-        except Exception:
-            pass
+        self._tf_valid_from = time.time()
         self.pose_error = "no lookup yet"
 
     def _on_costmap(self, msg: OccupancyGrid):
@@ -193,6 +197,11 @@ class RobotLink(Node):
             tf = self._tf_buffer.lookup_transform(
                 "map", "base_footprint", Time()
             )
+            stamp = tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9
+            if stamp < self._tf_valid_from:
+                # Left over from the mode we just tore down — see forget_tf.
+                self.pose_error = "stale transform from the previous mode"
+                return None
             self.pose_error = None
         except Exception as e:
             # Keep the reason — a null pose is the symptom of a broken TF
@@ -378,7 +387,7 @@ class ModeStack:
                 self._launch("cartographer", "cartographer.launch.py")
         if not self._wait_until(link.has_map, 60.0, "waiting for the map", gen):
             if self._current(gen):
-                self.phase = "cartographer published no map"
+                self.phase = self._diagnose_no_map()
             return
         self.phase = "mapping"
 
@@ -387,6 +396,24 @@ class ModeStack:
         # seconds instead of the minute or more Nav2's costmap gate costs.
         if autonomous:
             self._start_explore_locked(link, gen)
+
+    def _diagnose_no_map(self) -> str:
+        """Say why no map arrived, rather than just that none did.
+
+        The usual cause is not a slow start. Cartographer occasionally
+        latches onto a scan stamped in the future and then discards every
+        scan older than it — once per scan, for as long as it takes wall
+        time to catch up (96 s and 623 s have both been seen). It never
+        recovers on its own, and from the outside it looks exactly like
+        mapping that simply is not progressing. Restarting clears the
+        stored timestamp.
+        """
+        tail = self.log_tail("cartographer", 200)
+        if "Ignored subdivision" in tail:
+            return "cartographer is rejecting every scan — stop and start again"
+        if not self.running("cartographer"):
+            return "cartographer exited — see its log"
+        return "cartographer published no map"
 
     def ensure_nav2(self, link: "RobotLink", gen: int) -> bool:
         """Bring Nav2 up if it isn't, and wait for a usable global costmap.
@@ -398,8 +425,18 @@ class ModeStack:
         that transform does not exist until an initial pose has been set.
         """
         if link.pose() is None:
-            self.phase = "set the robot's position first"
-            return False
+            # Wait for it while mapping — cartographer may still be starting,
+            # and the transform is usually a second or two away. Under AMCL it
+            # never arrives on its own, so say what to do instead of stalling.
+            waited = self.mode == "mapping" and self._wait_until(
+                lambda: link.pose() is not None, 30.0,
+                "waiting for the robot's position", gen)
+            if not waited:
+                if self._current(gen):
+                    self.phase = ("set the robot's position first"
+                                  if self.mode == "localize"
+                                  else "no robot position — is the lidar up?")
+                return False
 
         if not self.running("nav2"):
             with self._lock:
