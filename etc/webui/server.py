@@ -35,11 +35,14 @@ import time
 import rclpy
 import numpy as np
 from flask import Flask, Response, jsonify, request, send_from_directory
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from explore_lite_msgs.msg import ExploreStatus
+from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import SetInitialPose
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -89,6 +92,17 @@ class RobotLink(Node):
             SetInitialPose, "/set_initial_pose")
         self._initpose_pub = self.create_publisher(
             PoseWithCovarianceStamped, "/initialpose", 10)
+        # A real action client, not a shell-out to `ros2 action send_goal`:
+        # cancelling has to land in well under a second (until it does, two
+        # publishers are fighting over an unmuxed /cmd_vel), and a
+        # subprocess cannot be cancelled from outside. Everything here is
+        # callback-driven, so the existing spin thread carries it and
+        # _drive_tick stays the only timer.
+        self._nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self._goal_handle = None
+        self.nav_state = "idle"
+        self.nav_goal = None
+        self.nav_distance = None
         self.create_subscription(
             ExploreStatus, "/explore/status", self._on_explore_status, 10)
         self.explore_status = None
@@ -147,6 +161,7 @@ class RobotLink(Node):
             self._map_seq += 1
         self._costmap_free = 0
         self.explore_status = None
+        self.forget_nav()
 
     def forget_tf(self):
         """Treat transforms older than now as belonging to the previous mode.
@@ -268,6 +283,86 @@ class RobotLink(Node):
                 return True, ""
             time.sleep(0.1)
         return False, "AMCL took the pose but published no transform"
+
+    # ── navigation goals ─────────────────────────────────────────────────
+    def send_goal(self, x: float, y: float, yaw: float):
+        """Ask Nav2 to drive somewhere. Returns (ok, message)."""
+        if not self._nav.wait_for_server(timeout_sec=2.0):
+            return False, "starting navigation — try again in a moment"
+
+        goal = NavigateToPose.Goal()
+        p = PoseStamped()
+        p.header.frame_id = "map"
+        p.header.stamp = self.get_clock().now().to_msg()
+        p.pose.position.x = float(x)
+        p.pose.position.y = float(y)
+        p.pose.orientation.z = math.sin(yaw / 2.0)
+        p.pose.orientation.w = math.cos(yaw / 2.0)
+        goal.pose = p
+
+        # Set before sending so /api/status shows the intent immediately,
+        # rather than a half-second of looking like nothing happened.
+        self.nav_state = "pending"
+        self.nav_goal = {"x": float(x), "y": float(y), "yaw": float(yaw)}
+        self.nav_distance = None
+        fut = self._nav.send_goal_async(goal,
+                                        feedback_callback=self._on_nav_feedback)
+        fut.add_done_callback(self._on_nav_accepted)
+        return True, ""
+
+    def _on_nav_accepted(self, fut):
+        try:
+            gh = fut.result()
+        except Exception:
+            self.nav_state = "rejected"
+            return
+        if not gh.accepted:
+            self.nav_state = "rejected"
+            self._goal_handle = None
+            return
+        self._goal_handle = gh
+        self.nav_state = "active"
+        gh.get_result_async().add_done_callback(self._on_nav_result)
+
+    def _on_nav_feedback(self, msg):
+        self.nav_distance = float(msg.feedback.distance_remaining)
+
+    def _on_nav_result(self, fut):
+        # Read the status, not the result fields: the installed nav2_msgs is
+        # the packaged one, and NavigateToPose.Result has drifted across
+        # releases, while GoalStatus has not.
+        try:
+            status = fut.result().status
+        except Exception:
+            status = GoalStatus.STATUS_ABORTED
+        self.nav_state = {
+            GoalStatus.STATUS_SUCCEEDED: "succeeded",
+            GoalStatus.STATUS_CANCELED: "canceled",
+        }.get(status, "aborted")
+        self._goal_handle = None
+        self.nav_distance = None
+
+    def cancel_goal(self):
+        """Idempotent — a no-op when nothing is running."""
+        gh = self._goal_handle
+        if gh is None:
+            return
+        self.nav_state = "canceling"
+        try:
+            gh.cancel_goal_async()      # fire and forget; the result lands
+        except Exception:                # in _on_nav_result as "canceled"
+            pass
+
+    def nav_status(self) -> dict:
+        return {"state": self.nav_state, "goal": self.nav_goal,
+                "distance": self.nav_distance}
+
+    def forget_nav(self):
+        self.cancel_goal()
+        self._goal_handle = None
+        self.nav_state = "idle"
+        self.nav_goal = None
+        self.nav_distance = None
 
     # ── drive ────────────────────────────────────────────────────────────
     def set_drive(self, linear: float, angular: float):
@@ -642,6 +737,40 @@ class ModeStack:
                              daemon=True).start()
         self.phase = "mapping"
 
+    def goal_after_nav2(self, link: "RobotLink", x: float, y: float,
+                        yaw: float):
+        """Worker: bring Nav2 up, then send the goal that asked for it."""
+        gen = self._join()
+        with self._busy:
+            if not self._current(gen) or self.mode != "localize":
+                return
+            try:
+                if not self.ensure_nav2(link, gen):
+                    return
+                # The costmap goes ready before bt_navigator finishes
+                # activating — measured at a third of a second apart — and a
+                # goal sent into that gap comes back "Action server is
+                # inactive. Rejecting the goal." Retry rather than making
+                # the user press it again.
+                deadline = time.monotonic() + 25.0
+                while time.monotonic() < deadline and self._current(gen):
+                    ok, err = link.send_goal(x, y, yaw)
+                    if not ok:
+                        self.phase = err
+                        return
+                    settle = time.monotonic() + 3.0
+                    while (time.monotonic() < settle
+                           and link.nav_state == "pending"):
+                        time.sleep(0.1)
+                    if link.nav_state != "rejected":
+                        self.phase = "localized"
+                        return
+                    time.sleep(1.0)
+                if self._current(gen):
+                    self.phase = "navigation would not accept the goal"
+            except Exception as e:
+                self.phase = f"error: {type(e).__name__}: {e}"
+
     def stop_explore(self):
         """Synchronous — /api/mapping/save relies on the robot being still
         by the time it returns. Nav2 is left up: re-arming should be instant,
@@ -792,6 +921,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "pose": pose,
             "map_seq": seq,
             "has_map": grid is not None,
+            "nav": link.nav_status(),
             "maps": list_maps(ws),
         })
 
@@ -865,6 +995,49 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         # 503 if AMCL is not there yet, 504 if it is but did not take it.
         code = 503 if "isn't running" in err else 504
         return jsonify({"ok": False, "error": err}), code
+
+    @app.route("/api/goal", methods=["POST"])
+    def goal():
+        if modes.mode != "localize":
+            return jsonify({"ok": False,
+                            "error": "only in localize mode"}), 409
+        body = request.json or {}
+        try:
+            x = float(body["x"]); y = float(body["y"]); yaw = float(body["yaw"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
+        if link.pose() is None:
+            return jsonify({"ok": False,
+                            "error": "set the robot's position first"}), 409
+
+        if not modes.running("nav2"):
+            # First goal in this mode brings Nav2 up, which is far too slow
+            # for a request. It could not have been started earlier: Nav2's
+            # costmap needs map→base_footprint at activation, and AMCL only
+            # publishes that once an initial pose has been set.
+            threading.Thread(target=modes.goal_after_nav2,
+                             args=(link, x, y, yaw), daemon=True).start()
+            return jsonify({"ok": True, "starting": True}), 202
+
+        ok, err = link.send_goal(x, y, yaw)
+        if not ok:
+            return jsonify({"ok": False, "error": err}), 503
+        return jsonify({"ok": True}), 202
+
+    @app.route("/api/goal/cancel", methods=["POST"])
+    def goal_cancel():
+        link.cancel_goal()
+        return jsonify({"ok": True})
+
+    @app.route("/api/takeover", methods=["POST"])
+    def takeover():
+        # The human has the wheel. Deciding here rather than in the client
+        # avoids branching on state that is up to half a second stale —
+        # exactly the case where it would fail to cancel.
+        if modes.running("explore"):
+            modes.stop_explore()
+        link.cancel_goal()
+        return ("", 204)
 
     @app.route("/api/explore", methods=["POST"])
     def explore():

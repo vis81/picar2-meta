@@ -25,6 +25,7 @@ let maps = [];             // saved maps, for the picker
 let lastSaved = null;      // preselect what you just saved when localizing
 let armed = null;          // null | 'pose' — a map tap is being awaited
 let drag = null;           // {a, p} in grid cells while placing
+let nav = { state: 'idle', goal: null, distance: null };
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -115,9 +116,30 @@ function draw() {
       ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
     }
 
+    if (nav.goal) drawGoal();
     if (drag) drawPlacement();
   }
   requestAnimationFrame(draw);
+}
+
+// Where Nav2 is heading. Greys out once the goal is over, rather than
+// vanishing, so a failed trip leaves something to look at.
+function drawGoal() {
+  const live = nav.state === 'active' || nav.state === 'pending';
+  const gx = (nav.goal.x - mapData.ox) / mapData.res;
+  const gy = mapData.h - (nav.goal.y - mapData.oy) / mapData.res;
+  const r = Math.max(7 / view.scale, 4);
+  ctx.strokeStyle = live ? '#3ddc84' : '#6b7684';
+  ctx.lineWidth = 2 / view.scale;
+  ctx.beginPath();
+  ctx.moveTo(gx - r, gy - r); ctx.lineTo(gx + r, gy + r);
+  ctx.moveTo(gx + r, gy - r); ctx.lineTo(gx - r, gy + r);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(gx, gy);
+  ctx.lineTo(gx + Math.cos(nav.goal.yaw) * r * 2.2,
+             gy - Math.sin(nav.goal.yaw) * r * 2.2);
+  ctx.stroke();
 }
 
 // Live preview of where the robot is being placed: a ring at the touch
@@ -181,6 +203,7 @@ async function poll() {
     mapName = s.map_name;
     localized = !!s.localized;
     maps = s.maps || [];
+    nav = s.nav || { state: 'idle', goal: null, distance: null };
     reportFailures();
     setLive(true);
 
@@ -205,8 +228,20 @@ function setLive(ok) {
                                                   : 'exploring')
       : 'mapping — drive with the stick';
   } else if (mode === 'localize') {
-    $('state').textContent = localized ? `localized on ${mapName}`
-                                       : 'position unknown';
+    if (nav.state === 'active' && nav.distance != null) {
+      $('state').textContent = `driving — ${nav.distance.toFixed(1)} m to go`;
+    } else if (nav.state === 'pending') {
+      $('state').textContent = 'sending goal…';
+    } else if (nav.state === 'canceling') {
+      $('state').textContent = 'stopping…';
+    } else if (nav.state === 'aborted' || nav.state === 'rejected') {
+      $('state').textContent = 'could not get there';
+    } else if (nav.state === 'canceled') {
+      $('state').textContent = 'stopped — you took over';
+    } else {
+      $('state').textContent = localized ? `localized on ${mapName}`
+                                         : 'position unknown';
+    }
   } else {
     $('state').textContent = 'idle';
   }
@@ -242,6 +277,13 @@ function renderControls() {
   $('save').classList.toggle('hidden', !mapping);
   $('setpose').classList.toggle('hidden', !loc);
   $('setpose').classList.toggle('armed', armed === 'pose');
+  $('goto').classList.toggle('hidden', !loc);
+  $('goto').classList.toggle('armed', armed === 'goal');
+  // Nav2 needs a pose before it can even start, so offer this only once
+  // AMCL knows where we are.
+  $('goto').disabled = !localized;
+  $('cancelgoal').classList.toggle(
+    'hidden', !(loc && (nav.state === 'active' || nav.state === 'pending')));
   $('changemap').classList.toggle('hidden', !loc);
   // Manual driving is available in both modes.
   $('stick').classList.toggle('hidden', mode === 'idle');
@@ -309,18 +351,25 @@ $('m-map').onclick = () => {
 $('m-loc').onclick = () => openMapPicker();
 $('changemap').onclick = () => openMapPicker();
 
-$('setpose').onclick = () => {
-  armed = armed === 'pose' ? null : 'pose';
+$('goto').onclick = () => arm(armed === 'goal' ? null : 'goal');
+$('cancelgoal').onclick = () => post('/api/goal/cancel');
+
+function arm(what) {
+  armed = what;
   const hint = $('hint');
   hint.dataset.showing = '';
   if (armed) {
     hint.classList.remove('hidden');
-    hint.textContent = 'Tap where the robot is — drag to point the way it faces.';
+    hint.textContent = armed === 'goal'
+      ? 'Tap where to go — drag to set the direction to arrive facing.'
+      : 'Tap where the robot is — drag to point the way it faces.';
   } else {
     hint.classList.add('hidden');
   }
   renderControls();
-};
+}
+
+$('setpose').onclick = () => arm(armed === 'pose' ? null : 'pose');
 $('cancel-load').onclick = () => $('mapsheet').classList.add('hidden');
 
 function openMapPicker() {
@@ -431,8 +480,12 @@ stick.addEventListener('touchstart', (e) => {
   const t = e.changedTouches[0];
   stickId = t.identifier;
   stickMove(t);
-  // Pausing exploration on manual input avoids fighting the planner.
-  if (modes.explore) post('/api/explore', { on: false });
+  // Yield autonomy on manual input. One unconditional call: /cmd_vel has
+  // no mux, so a live Nav2 goal would resume driving the instant you lift
+  // your thumb, and deciding here would branch on state up to half a
+  // second stale — exactly when it matters. The server knows what to stop.
+  post('/api/takeover');
+  armed = null; drag = null;
   driveTimer = setInterval(() => post('/api/drive', cmd), 100);
 }, { passive: false });
 
@@ -512,19 +565,22 @@ function dragYaw() {
 async function commitDrag() {
   const m = gridToMetres(drag.a);
   const body = { x: m.x, y: m.y, yaw: dragYaw() };
+  const url = armed === 'goal' ? '/api/goal' : '/api/initialpose';
   const hint = $('hint');
   hint.dataset.showing = '';
   try {
-    const r = await (await post('/api/initialpose', body)).json();
+    const r = await (await post(url, body)).json();
     if (!r.ok) {
       hint.classList.remove('hidden');
-      hint.textContent = r.error || 'Could not set the position.';
+      hint.textContent = r.error ||
+        (armed === 'goal' ? 'Could not send the goal.'
+                          : 'Could not set the position.');
     } else {
       hint.classList.add('hidden');
     }
   } catch (err) {
     hint.classList.remove('hidden');
-    hint.textContent = 'Could not set the position: ' + err;
+    hint.textContent = 'Failed: ' + err;
   }
 }
 
