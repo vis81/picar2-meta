@@ -410,12 +410,7 @@ class ModeStack:
         self.mode = "mapping"
         self.map_name = None
 
-        if not self.running("cartographer"):
-            with self._lock:
-                self._launch("cartographer", "cartographer.launch.py")
-        if not self._wait_until(link.has_map, 60.0, "waiting for the map", gen):
-            if self._current(gen):
-                self.phase = self._diagnose_no_map()
+        if not self._start_cartographer(link, gen):
             return
         # Nav2 is deliberately not started. Driving by hand needs only
         # cartographer, so this reaches a usable joystick in about ten
@@ -446,6 +441,61 @@ class ModeStack:
         # transform, so nothing else can proceed here.
         self.phase = "set the robot's position"
 
+    # Enough rejections to be certain it is wedged rather than mid-startup:
+    # they arrive at the scan rate, so this is about two seconds' worth.
+    POISON_LINES = 20
+
+    def _scans_rejected(self) -> bool:
+        """True when cartographer is discarding every scan.
+
+        It takes a scan stamped far in the future (+96 s, +623 s and +669 s
+        have all been seen), stores that as the last subdivision time, and
+        then drops everything older — which is everything — until wall time
+        catches up.
+
+        The bad scan comes from the lidar driver, not from cartographer:
+        restarting cartographer alone does not clear it (observed failing
+        three times in a row), while restarting bringup fixes it
+        immediately. Sampling the topic from outside shows nothing wrong,
+        which fits a rare bad message that a BEST_EFFORT subscriber drops
+        and cartographer's RELIABLE one receives.
+        """
+        tail = self.log_tail("cartographer", 120)
+        return tail.count("Ignored subdivision") >= self.POISON_LINES
+
+    def _start_cartographer(self, link: "RobotLink", gen: int) -> bool:
+        """Launch cartographer and wait for its first grid.
+
+        One retry, because the wedge above is occasionally cleared by a
+        fresh subscription. If it survives that, only a bringup restart
+        helps, so stop burning the user's time and say so.
+        """
+        for attempt in range(2):
+            if not self.running("cartographer"):
+                with self._lock:
+                    self._launch("cartographer", "cartographer.launch.py")
+
+            deadline = time.monotonic() + 45.0
+            self.phase = ("waiting for the map" if attempt == 0
+                          else "retrying cartographer")
+            while time.monotonic() < deadline:
+                if not self._current(gen):
+                    return False
+                if link.has_map():
+                    return True
+                if self._scans_rejected():
+                    break            # wedged — no point waiting out the clock
+                time.sleep(0.5)
+
+            if attempt == 0:
+                with self._lock:
+                    self._stop("cartographer")
+                link.forget_map()
+
+        if self._current(gen):
+            self.phase = self._diagnose_no_map()
+        return False
+
     def _diagnose_no_map(self) -> str:
         """Say why no map arrived, rather than just that none did.
 
@@ -459,7 +509,9 @@ class ModeStack:
         """
         tail = self.log_tail("cartographer", 200)
         if "Ignored subdivision" in tail:
-            return "cartographer is rejecting every scan — stop and start again"
+            # Restarting cartographer does not clear this — the bad scan
+            # comes from the lidar driver, which lives in bringup.
+            return "lidar timestamps are bad — restart bringup on the robot"
         if not self.running("cartographer"):
             return "cartographer exited — see its log"
         return "cartographer published no map"
