@@ -20,17 +20,22 @@
 
 <canvas id="map"></canvas>
 
-<div id="hint" class="hint">Press <b>Start mapping</b> and the robot will explore on its own.</div>
+<div id="hint" class="hint">Choose <b>Mapping</b> to build a new map, or <b>Localize</b> to use one you saved.</div>
 
 <div id="stick" class="stick hidden">
   <div id="knob" class="knob"></div>
 </div>
 
 <footer id="controls">
-  <button id="start" class="btn primary">Start mapping</button>
+  <div id="modepill" class="pill">
+    <button id="m-idle" class="seg" data-mode="idle">Off</button>
+    <button id="m-map" class="seg" data-mode="mapping">Mapping</button>
+    <button id="m-loc" class="seg" data-mode="localize">Localize</button>
+  </div>
   <button id="explore" class="btn hidden">Explore automatically</button>
   <button id="save" class="btn hidden">Finish &amp; save</button>
-  <button id="stop" class="btn danger hidden">Stop</button>
+  <button id="setpose" class="btn hidden">Set position</button>
+  <button id="changemap" class="btn hidden">Change map</button>
 </footer>
 
 <div id="sheet" class="sheet hidden">
@@ -43,6 +48,18 @@
       <button id="confirm-save" class="btn primary">Save</button>
     </div>
     <div id="saveerr" class="err"></div>
+  </div>
+</div>
+
+<div id="mapsheet" class="sheet hidden">
+  <div class="sheet-inner">
+    <h2>Load a map</h2>
+    <p>The robot will localize against this map instead of building a new one.</p>
+    <div id="maplist" class="maplist"></div>
+    <div class="sheet-buttons">
+      <button id="cancel-load" class="btn">Cancel</button>
+    </div>
+    <div id="loaderr" class="err"></div>
   </div>
 </div>
 

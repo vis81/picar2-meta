@@ -18,6 +18,11 @@ let modes = {};
 let detail = {};
 let phase = 'idle';
 let exploreStatus = null;
+let mode = 'idle';         // idle | mapping | localize — the server owns this
+let mapName = null;        // localize: which saved map is loaded
+let localized = false;
+let maps = [];             // saved maps, for the picker
+let lastSaved = null;      // preselect what you just saved when localizing
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -130,6 +135,13 @@ async function poll() {
     phase = s.phase || 'idle';
     exploreStatus = s.explore_status;
     pose = s.pose;
+    // The server owns the mode — deriving it from which processes happen to
+    // be alive is what the old UI did, and it cannot tell "mapping without
+    // nav2 yet" from "not mapping".
+    mode = s.mode || 'idle';
+    mapName = s.map_name;
+    localized = !!s.localized;
+    maps = s.maps || [];
     reportFailures();
     setLive(true);
 
@@ -144,21 +156,27 @@ async function poll() {
 function setLive(ok) {
   $('dot').className = 'dot ' + (ok ? 'live' : 'dead');
   if (!ok) { $('state').textContent = 'no connection'; return; }
+  // Any phase the server invents is shown verbatim, so new ones need no
+  // client change.
   if (phase && phase !== 'idle' && phase !== 'mapping') {
     $('state').textContent = phase + '…';        // e.g. "waiting for nav2…"
+  } else if (mode === 'mapping') {
+    $('state').textContent = modes.explore
+      ? (exploreStatus === 'exploration_complete' ? 'explored — nothing left'
+                                                  : 'exploring')
+      : 'mapping — drive with the stick';
+  } else if (mode === 'localize') {
+    $('state').textContent = localized ? `localized on ${mapName}`
+                                       : 'position unknown';
   } else {
-    $('state').textContent = modes.cartographer
-      ? (modes.explore
-          ? (exploreStatus === 'exploration_complete' ? 'explored — nothing left'
-                                                      : 'exploring')
-          : 'mapping — paused')
-      : 'idle';
+    $('state').textContent = 'idle';
   }
 }
 
 function renderChips() {
   const chips = [
     ['map', modes.cartographer],
+    ['amcl', modes.amcl],
     ['nav', modes.nav2],
     ['explore', modes.explore],
   ];
@@ -168,18 +186,32 @@ function renderChips() {
 }
 
 function renderControls() {
-  const mapping = !!modes.cartographer;
-  $('start').classList.toggle('hidden', mapping);
+  const mapping = mode === 'mapping';
+  const loc = mode === 'localize';
+
+  // The pill is the only way in or out of a mode; disable it mid-switch,
+  // because a teardown SIGINT waits up to 10 s per layer and a second tap
+  // would just queue behind it.
+  const switching = /^(switching|stopping|loading)/.test(phase || '');
+  for (const [id, m] of [['m-idle', 'idle'], ['m-map', 'mapping'],
+                         ['m-loc', 'localize']]) {
+    $(id).classList.toggle('on', mode === m);
+    $(id).disabled = switching;
+  }
+
   $('explore').classList.toggle('hidden', !mapping);
   $('save').classList.toggle('hidden', !mapping);
-  $('stop').classList.toggle('hidden', !mapping);
-  $('stick').classList.toggle('hidden', !mapping);
+  $('setpose').classList.toggle('hidden', !loc);
+  $('changemap').classList.toggle('hidden', !loc);
+  // Manual driving is available in both modes.
+  $('stick').classList.toggle('hidden', mode === 'idle');
+
   // Nav2 is not running until this is pressed, so the off state is an offer
   // to start exploring, not to resume something paused.
   $('explore').textContent = !modes.explore ? 'Explore automatically'
     : exploreStatus === 'exploration_complete' ? 'Search again'
     : 'Pause exploring';
-  if (mapping) $('hint').classList.add('hidden');
+  if (mode !== 'idle') $('hint').classList.add('hidden');
 }
 
 // A layer that exited non-zero means the launch died — show why, since the
@@ -205,18 +237,69 @@ const post = (url, body) => fetch(url, {
 
 // ── buttons ───────────────────────────────────────────────────────────
 
-$('start').onclick = async () => {
-  $('start').disabled = true;
+// ── mode pill ─────────────────────────────────────────────────────────
+
+function setMode(m, map) {
   const hint = $('hint');
   hint.dataset.showing = '';
-  hint.classList.remove('hidden');
-  hint.textContent = 'Starting cartographer — the joystick works as soon as the map appears.';
-  // autonomous:false — cartographer only. Nav2 costs a minute or more on the
-  // Pi and manual mapping does not need it, so it waits until you ask to
-  // explore.
-  await post('/api/mapping/start', { autonomous: false });
-  setTimeout(() => { $('start').disabled = false; }, 4000);
+  if (m === 'mapping') {
+    hint.classList.remove('hidden');
+    hint.textContent = 'Starting cartographer — the stick works as soon as the map appears.';
+  }
+  return post('/api/mode', map ? { mode: m, map } : { mode: m });
+}
+
+$('m-idle').onclick = () => {
+  // Leaving mapping throws away an unsaved map; leaving localize costs
+  // nothing, so only ask in the first case.
+  if (mode === 'mapping' &&
+      !confirm('Stop mapping? The map is discarded unless you saved it.')) return;
+  setMode('idle');
+  mapData = null; mapSeq = -1; view.fitted = false;
 };
+
+$('m-map').onclick = () => {
+  if (mode === 'mapping') return;
+  setMode('mapping');
+  mapData = null; mapSeq = -1; view.fitted = false;
+};
+
+// Localize needs a map, so the pill opens the picker and the choice is what
+// actually switches.
+$('m-loc').onclick = () => openMapPicker();
+$('changemap').onclick = () => openMapPicker();
+$('cancel-load').onclick = () => $('mapsheet').classList.add('hidden');
+
+function openMapPicker() {
+  const list = $('maplist');
+  $('loaderr').textContent = '';
+  const usable = maps.filter((m) => m.has_grid);
+  if (!maps.length) {
+    list.innerHTML = '<p>No saved maps yet — build one in Mapping mode and press ' +
+                     '<b>Finish &amp; save</b>.</p>';
+  } else {
+    list.innerHTML = maps.map((m) => {
+      const when = new Date(m.mtime * 1000).toLocaleString();
+      const mb = (m.size / 1048576).toFixed(1);
+      // A map with no grid cannot be localized on. Show it disabled with the
+      // reason rather than hiding it — you just saved it and would wonder
+      // where it went.
+      const why = m.has_grid ? `<small>${when} · ${mb} MB</small>`
+                             : '<small>no grid saved — cannot localize on this</small>';
+      const sel = (m.name === lastSaved) ? ' primary' : '';
+      return `<button class="btn maprow${sel}" data-map="${m.name}"` +
+             `${m.has_grid ? '' : ' disabled'}>${m.name}${why}</button>`;
+    }).join('');
+    for (const b of list.querySelectorAll('[data-map]')) {
+      b.onclick = () => {
+        $('mapsheet').classList.add('hidden');
+        mapData = null; mapSeq = -1; view.fitted = false;
+        setMode('localize', b.dataset.map);
+      };
+    }
+  }
+  $('mapsheet').classList.remove('hidden');
+}
 
 $('explore').onclick = () => {
   if (modes.explore && exploreStatus === 'exploration_complete') {
@@ -232,12 +315,6 @@ $('explore').onclick = () => {
     hint.textContent = 'Starting nav2 so the robot can plan — up to a minute on the Pi.';
     post('/api/explore', { on: true });
   }
-};
-
-$('stop').onclick = async () => {
-  if (!confirm('Stop mapping? The map is discarded unless you saved it.')) return;
-  await post('/api/mapping/stop');
-  mapData = null; mapSeq = -1; view.fitted = false;
 };
 
 $('save').onclick = () => {
@@ -257,6 +334,9 @@ $('confirm-save').onclick = async () => {
     if (r.ok) {
       $('sheet').classList.add('hidden');
       $('saveerr').textContent = '';
+      // Offer this one first next time Localize is opened — it is almost
+      // always the map you want, and it is the only one guaranteed to exist.
+      lastSaved = name;
     } else {
       $('saveerr').textContent = r.detail || 'Save failed.';
     }

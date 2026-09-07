@@ -361,27 +361,55 @@ class ModeStack:
                 if name in names:
                     self._stop(name)
 
-    def start_mapping(self, autonomous: bool, link: "RobotLink"):
-        """Wait for each layer to actually be usable before starting the next.
+    def set_mode(self, mode: str, link: "RobotLink",
+                 map_yaml: str | None = None, map_name: str | None = None):
+        """Worker: switch the whole stack to one mode.
 
-        Fixed sleeps do not work here: Nav2's Smac planner takes tens of
-        seconds to come up on a Pi 4, and explore_lite started before the
-        global costmap exists just sits there doing nothing.
+        Stop-then-start, never overlapping. Cartographer and AMCL both
+        publish /map *and* broadcast map→odom, so even a moment of overlap
+        gives odom two parents and a pose that flickers between two
+        estimates.
         """
         gen = self._begin()
         with self._busy:
             if not self._current(gen):
                 return
-            self.mode = "mapping"
-            self.map_name = None
             try:
-                self._start_mapping(autonomous, link, gen)
+                if mode == "mapping":
+                    self._to_mapping(link, gen)
+                elif mode == "localize":
+                    self._to_localize(link, gen, map_yaml, map_name)
+                else:
+                    self._to_idle(link)
             except Exception as e:
                 # A dead thread leaves the phase frozen on whatever it was
                 # doing, which reads exactly like a hang.
                 self.phase = f"error: {type(e).__name__}: {e}"
 
-    def _start_mapping(self, autonomous: bool, link: "RobotLink", gen: int):
+    def _to_idle(self, link: "RobotLink"):
+        """Caller holds _busy."""
+        self.phase = "stopping"
+        self._teardown(set(self.LAYERS))
+        self.mode = "idle"
+        self.map_name = None
+        self.phase = "idle"
+        link.forget_map()
+        link.forget_tf()
+
+    def _to_mapping(self, link: "RobotLink", gen: int):
+        """Caller holds _busy."""
+        self.phase = "switching to mapping"
+        self._teardown({"explore", "nav2", "amcl"})
+        if not self._current(gen):
+            return
+        # Both are latched state the new stack must not inherit — otherwise
+        # the gate below passes on AMCL's grid and we never notice that
+        # cartographer failed to start.
+        link.forget_map()
+        link.forget_tf()
+        self.mode = "mapping"
+        self.map_name = None
+
         if not self.running("cartographer"):
             with self._lock:
                 self._launch("cartographer", "cartographer.launch.py")
@@ -389,13 +417,34 @@ class ModeStack:
             if self._current(gen):
                 self.phase = self._diagnose_no_map()
             return
+        # Nav2 is deliberately not started. Driving by hand needs only
+        # cartographer, so this reaches a usable joystick in about ten
+        # seconds rather than the minute or more Nav2's costmap gate costs.
         self.phase = "mapping"
 
-        # Nav2 is deliberately not started here. Driving by hand needs only
-        # cartographer, so this gets the user a usable joystick in about ten
-        # seconds instead of the minute or more Nav2's costmap gate costs.
-        if autonomous:
-            self._start_explore_locked(link, gen)
+    def _to_localize(self, link: "RobotLink", gen: int,
+                     map_yaml: str, map_name: str):
+        """Caller holds _busy."""
+        self.phase = "switching to localize"
+        self._teardown({"explore", "nav2", "cartographer"})
+        if not self._current(gen):
+            return
+        link.forget_map()
+        link.forget_tf()
+        self.mode = "localize"
+        self.map_name = map_name
+
+        with self._lock:
+            self._launch("amcl", "amcl.launch.py", {"map_yaml": map_yaml})
+        if not self._wait_until(link.has_map, 30.0,
+                                f"loading {map_name}", gen):
+            if self._current(gen):
+                self.phase = "the map never loaded — see the amcl log"
+            return
+        # Terminal until the user acts: AMCL withholds map→odom until it is
+        # told where the robot is, and Nav2 cannot start without that
+        # transform, so nothing else can proceed here.
+        self.phase = "set the robot's position"
 
     def _diagnose_no_map(self) -> str:
         """Say why no map arrived, rather than just that none did.
@@ -521,13 +570,14 @@ class ModeStack:
         with self._busy:
             if not self._current(gen):
                 return
-            self.phase = "idle"
-            self._teardown(set(self.LAYERS))
-            self.mode = "idle"
-            self.map_name = None
             if link is not None:
-                link.forget_map()
-                link.forget_tf()
+                self._to_idle(link)
+            else:
+                # Process shutdown: no link to clean up, just kill the tree.
+                self.phase = "idle"
+                self._teardown(set(self.LAYERS))
+                self.mode = "idle"
+                self.map_name = None
 
     def _stop(self, name: str):
         p = self._procs.pop(name, None)
@@ -647,18 +697,36 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         resp.headers["X-Map-Origin-Y"] = str(info.origin.position.y)
         return resp
 
-    @app.route("/api/mapping/start", methods=["POST"])
-    def mapping_start():
-        auto = bool((request.json or {}).get("autonomous", True))
-        threading.Thread(
-            target=modes.start_mapping, args=(auto, link), daemon=True
-        ).start()
-        return jsonify({"ok": True})
+    @app.route("/api/mode", methods=["POST"])
+    def set_mode():
+        body = request.json or {}
+        mode = body.get("mode", "idle")
+        if mode not in ("idle", "mapping", "localize"):
+            return jsonify({"ok": False, "error": f"unknown mode {mode!r}"}), 400
 
-    @app.route("/api/mapping/stop", methods=["POST"])
-    def mapping_stop():
-        modes.stop_all(link)
-        return jsonify({"ok": True})
+        map_yaml = map_name = None
+        if mode == "localize":
+            map_name = (body.get("map") or "").strip()
+            if not map_name or "/" in map_name or map_name.startswith("."):
+                return jsonify({"ok": False, "error": "bad map name"}), 400
+            map_yaml = os.path.join(ws, "maps", map_name + ".yaml")
+            # Check before launching: map_server would otherwise come up,
+            # fail to load, and leave the user watching a phase that never
+            # advances with nothing saying why.
+            if not os.path.isfile(map_yaml):
+                return jsonify({
+                    "ok": False,
+                    "error": f"no saved grid for {map_name!r}",
+                }), 400
+
+        # Switching tears down a whole stack and waits for the next one, far
+        # longer than a request should take — hand it to a worker and let the
+        # client follow `phase`.
+        threading.Thread(
+            target=modes.set_mode, args=(mode, link, map_yaml, map_name),
+            daemon=True,
+        ).start()
+        return jsonify({"ok": True}), 202
 
     @app.route("/api/explore", methods=["POST"])
     def explore():
