@@ -274,6 +274,13 @@ function renderControls() {
   }
 
   $('explore').classList.toggle('hidden', !mapping);
+  // When explore reports itself finished the main button becomes "Search
+  // again" and resumes, so without this there is no way to stop exploring
+  // short of tearing the mode down — and "finished" is a state it sits in
+  // for minutes at a time while the supervisor nudges it.
+  $('stopexplore').classList.toggle(
+    'hidden', !(mapping && modes.explore
+                && exploreStatus === 'exploration_complete'));
   $('save').classList.toggle('hidden', !mapping);
   $('setpose').classList.toggle('hidden', !loc);
   $('setpose').classList.toggle('armed', armed === 'pose');
@@ -357,6 +364,7 @@ $('changemap').onclick = () => openMapPicker();
 
 $('goto').onclick = () => arm(armed === 'goal' ? null : 'goal');
 $('cancelgoal').onclick = () => post('/api/goal/cancel');
+$('stopexplore').onclick = () => post('/api/explore', { on: false });
 
 function arm(what) {
   armed = what;
