@@ -23,10 +23,13 @@ repositories:
     type: git
     url: https://github.com/ldrobotSensorTeam/ldlidar_stl_sdk.git
     version: master
+  # Fork carrying one commit on upstream main: blacklisted frontiers expire and
+  # an explicit resume clears the blacklist, so the web UI's nudge is not a
+  # no-op. See the commit for the hardware evidence.
   explore_lite:
     type: git
-    url: https://github.com/robo-friends/m-explore-ros2.git
-    version: main
+    url: https://github.com/vis81/m-explore-ros2.git
+    version: picar2/main
   imu_calib:
     type: git
     url: https://github.com/Nathan85001/imu_calib.git
