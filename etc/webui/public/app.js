@@ -174,7 +174,9 @@ function renderControls() {
   $('save').classList.toggle('hidden', !mapping);
   $('stop').classList.toggle('hidden', !mapping);
   $('stick').classList.toggle('hidden', !mapping);
-  $('explore').textContent = !modes.explore ? 'Resume exploring'
+  // Nav2 is not running until this is pressed, so the off state is an offer
+  // to start exploring, not to resume something paused.
+  $('explore').textContent = !modes.explore ? 'Explore automatically'
     : exploreStatus === 'exploration_complete' ? 'Search again'
     : 'Pause exploring';
   if (mapping) $('hint').classList.add('hidden');
@@ -208,16 +210,27 @@ $('start').onclick = async () => {
   const hint = $('hint');
   hint.dataset.showing = '';
   hint.classList.remove('hidden');
-  hint.textContent = 'Starting cartographer, then nav2 — nav2 takes up to a minute on the Pi.';
-  await post('/api/mapping/start', { autonomous: true });
+  hint.textContent = 'Starting cartographer — the joystick works as soon as the map appears.';
+  // autonomous:false — cartographer only. Nav2 costs a minute or more on the
+  // Pi and manual mapping does not need it, so it waits until you ask to
+  // explore.
+  await post('/api/mapping/start', { autonomous: false });
   setTimeout(() => { $('start').disabled = false; }, 4000);
 };
 
 $('explore').onclick = () => {
   if (modes.explore && exploreStatus === 'exploration_complete') {
     post('/api/explore/resume');   // stalled, not finished — kick it
+  } else if (modes.explore) {
+    post('/api/explore', { on: false });
   } else {
-    post('/api/explore', { on: !modes.explore });
+    // First press also brings Nav2 up, which is slow — say so, since the
+    // phase does not update for a second or two.
+    const hint = $('hint');
+    hint.dataset.showing = '';
+    hint.classList.remove('hidden');
+    hint.textContent = 'Starting nav2 so the robot can plan — up to a minute on the Pi.';
+    post('/api/explore', { on: true });
   }
 };
 

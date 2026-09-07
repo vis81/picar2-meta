@@ -122,6 +122,36 @@ class RobotLink(Node):
         with self._lock:
             return self._map, self._map_seq
 
+    def forget_map(self):
+        """Drop the current grid and costmap count.
+
+        Both are latched state that nothing ever resets, which is harmless
+        while the process only ever mounts one stack. Once modes can be
+        switched it is not: the readiness gates would pass instantly on the
+        previous mode's grid, so a map_server that never loaded would look
+        exactly like success. Bump the sequence so the browser refetches
+        rather than keeping the old picture on screen.
+        """
+        with self._lock:
+            self._map = None
+            self._map_seq += 1
+        self._costmap_free = 0
+        self.explore_status = None
+
+    def forget_tf(self):
+        """Clear the transform buffer.
+
+        pose() looks up the latest available transform, and tf2 keeps ten
+        seconds of history, so a dead cartographer's last map→odom stays
+        lookup-able well after the process is gone. Anything gating on "is
+        there a pose yet" would pass on that ghost.
+        """
+        try:
+            self._tf_buffer.clear()
+        except Exception:
+            pass
+        self.pose_error = "no lookup yet"
+
     def _on_costmap(self, msg: OccupancyGrid):
         cells = np.frombuffer(bytes(msg.data), dtype=np.int8)
         self._costmap_free = int(np.count_nonzero((cells >= 0) & (cells <= 25)))
@@ -213,25 +243,58 @@ def clamp(v, lo, hi):
 class ModeStack:
     """Starts and stops the cartographer → nav2 → explore chain."""
 
-    LAYERS = ("cartographer", "nav2", "explore")
+    # Ordered producers-first, so reversed() is a safe teardown order:
+    # explore → nav2 → amcl → cartographer, consumers before what they read.
+    # cartographer and amcl are peers — both publish /map and broadcast
+    # map→odom, so they must never run at the same time.
+    LAYERS = ("cartographer", "amcl", "nav2", "explore")
     LOG_DIR = "/tmp/picar-webui"
 
     def __init__(self):
         self._procs: dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
-        self._abort = threading.Event()
+        # Transitions are serialised, and each carries a generation so a
+        # superseded one unwinds instead of racing the new one. A plain
+        # threading.Event cannot express "abort the previous transition but
+        # not this one" — see _begin/_join.
+        self._busy = threading.Lock()
+        self._gen = 0
+        self._gen_lock = threading.Lock()
+        # The mode is separate from the layer set, because layers come up
+        # lazily within a mode: "mapping" may or may not have Nav2 yet.
+        self.mode = "idle"          # idle | mapping | localize
+        self.map_name = None        # localize: which saved map is loaded
         self.phase = "idle"
         os.makedirs(self.LOG_DIR, exist_ok=True)
+
+    # ── transition generations ───────────────────────────────────────────
+    def _begin(self) -> int:
+        """Claim a transition, superseding any in flight."""
+        with self._gen_lock:
+            self._gen += 1
+            return self._gen
+
+    def _join(self) -> int:
+        """Join the current transition without superseding it, so an action
+        taken while a mode is still coming up queues behind it."""
+        with self._gen_lock:
+            return self._gen
+
+    def _current(self, gen: int) -> bool:
+        with self._gen_lock:
+            return gen == self._gen
 
     def log_path(self, name: str) -> str:
         return os.path.join(self.LOG_DIR, f"{name}.log")
 
-    def _launch(self, name: str, launch_file: str):
+    def _launch(self, name: str, launch_file: str,
+                args: dict[str, str] | None = None):
         # Output goes to a file, never DEVNULL: a launch that dies on startup
         # is the most likely failure here, and discarding stderr makes it
         # invisible from the phone.
-        log = open(self.log_path(name), "wb")
         cmd = ["ros2", "launch", "picar2_bringup", launch_file]
+        cmd += [f"{k}:={v}" for k, v in (args or {}).items()]
+        log = open(self.log_path(name), "wb")
         log.write(f"$ {' '.join(cmd)}\n".encode())
         log.flush()
         self._procs[name] = subprocess.Popen(
@@ -271,16 +334,23 @@ class ModeStack:
             }
         return out
 
-    def _wait_until(self, pred, timeout: float, phase: str) -> bool:
+    def _wait_until(self, pred, timeout: float, phase: str, gen: int) -> bool:
         self.phase = phase
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self._abort.is_set():
+            if not self._current(gen):
                 return False
             if pred():
                 return True
             time.sleep(0.5)
         return False
+
+    def _teardown(self, names):
+        """Stop the named layers, consumers before producers."""
+        with self._lock:
+            for name in reversed(self.LAYERS):
+                if name in names:
+                    self._stop(name)
 
     def start_mapping(self, autonomous: bool, link: "RobotLink"):
         """Wait for each layer to actually be usable before starting the next.
@@ -289,37 +359,92 @@ class ModeStack:
         seconds to come up on a Pi 4, and explore_lite started before the
         global costmap exists just sits there doing nothing.
         """
-        self._abort.clear()
-        try:
-            self._start_mapping(autonomous, link)
-        except Exception as e:
-            # A dead thread leaves the phase frozen on whatever it was doing,
-            # which reads exactly like a hang.
-            self.phase = f"error: {type(e).__name__}: {e}"
+        gen = self._begin()
+        with self._busy:
+            if not self._current(gen):
+                return
+            self.mode = "mapping"
+            self.map_name = None
+            try:
+                self._start_mapping(autonomous, link, gen)
+            except Exception as e:
+                # A dead thread leaves the phase frozen on whatever it was
+                # doing, which reads exactly like a hang.
+                self.phase = f"error: {type(e).__name__}: {e}"
 
-    def _start_mapping(self, autonomous: bool, link: "RobotLink"):
+    def _start_mapping(self, autonomous: bool, link: "RobotLink", gen: int):
         if not self.running("cartographer"):
             with self._lock:
                 self._launch("cartographer", "cartographer.launch.py")
-        if not self._wait_until(link.has_map, 60.0, "waiting for the map"):
-            self.phase = "cartographer published no map"
+        if not self._wait_until(link.has_map, 60.0, "waiting for the map", gen):
+            if self._current(gen):
+                self.phase = "cartographer published no map"
             return
+        self.phase = "mapping"
+
+        # Nav2 is deliberately not started here. Driving by hand needs only
+        # cartographer, so this gets the user a usable joystick in about ten
+        # seconds instead of the minute or more Nav2's costmap gate costs.
+        if autonomous:
+            self._start_explore_locked(link, gen)
+
+    def ensure_nav2(self, link: "RobotLink", gen: int) -> bool:
+        """Bring Nav2 up if it isn't, and wait for a usable global costmap.
+
+        The pose precondition is not politeness, it is required: Nav2's
+        costmap blocks on a map→base_footprint transform during activation
+        and returns FAILURE after initial_transform_timeout (60 s), which
+        kills the lifecycle bringup for good rather than retrying. Under AMCL
+        that transform does not exist until an initial pose has been set.
+        """
+        if link.pose() is None:
+            self.phase = "set the robot's position first"
+            return False
 
         if not self.running("nav2"):
             with self._lock:
                 self._launch("nav2", "nav2.launch.py")
-        if not self._wait_until(link.costmap_ready, 180.0, "waiting for nav2"):
-            self.phase = "nav2 global costmap never appeared"
-            return
+        elif link.costmap_ready():
+            return True
+        if not self._wait_until(link.costmap_ready, 180.0,
+                                "waiting for nav2", gen):
+            if self._current(gen):
+                self.phase = "nav2 global costmap never appeared"
+            return False
+        return True
 
-        if autonomous and not self.running("explore"):
+    def start_explore(self, link: "RobotLink"):
+        """Worker: bring Nav2 up if needed, then start exploring."""
+        # _join, not _begin: pressing this while the mode is still coming up
+        # should queue behind that, not cancel it.
+        gen = self._join()
+        with self._busy:
+            if not self._current(gen) or self.mode != "mapping":
+                return
+            try:
+                self._start_explore_locked(link, gen)
+            except Exception as e:
+                self.phase = f"error: {type(e).__name__}: {e}"
+
+    def _start_explore_locked(self, link: "RobotLink", gen: int):
+        """Caller holds _busy."""
+        if not self.ensure_nav2(link, gen):
+            return
+        if not self.running("explore"):
             with self._lock:
                 self._launch("explore", "explore.launch.py")
-            threading.Thread(target=self._nurse_explore, args=(link,),
+            threading.Thread(target=self._nurse_explore, args=(link, gen),
                              daemon=True).start()
         self.phase = "mapping"
 
-    def _nurse_explore(self, link: "RobotLink"):
+    def stop_explore(self):
+        """Synchronous — /api/mapping/save relies on the robot being still
+        by the time it returns. Nav2 is left up: re-arming should be instant,
+        and an idle Nav2 publishes no /cmd_vel."""
+        with self._lock:
+            self._stop("explore")
+
+    def _nurse_explore(self, link: "RobotLink", gen: int):
         """explore_lite gives up permanently the first time a frontier search
         comes back empty, and that happens for transient reasons too — most
         often the global costmap mid-resize as the map grows, which briefly
@@ -334,7 +459,7 @@ class ModeStack:
         last_seq = -1
         last_change = time.monotonic()
 
-        while not self._abort.is_set():
+        while self._current(gen):
             time.sleep(POLL_S)
             if not self.running("explore"):
                 return
@@ -354,19 +479,18 @@ class ModeStack:
             else:
                 self.phase = "explored — map stable"
 
-    def set_explore(self, on: bool):
-        with self._lock:
-            if on and not self.running("explore"):
-                self._launch("explore", "explore.launch.py")
-            elif not on:
-                self._stop("explore")
-
-    def stop_all(self):
-        self._abort.set()
-        self.phase = "idle"
-        with self._lock:
-            for name in reversed(self.LAYERS):
-                self._stop(name)
+    def stop_all(self, link: "RobotLink | None" = None):
+        gen = self._begin()
+        with self._busy:
+            if not self._current(gen):
+                return
+            self.phase = "idle"
+            self._teardown(set(self.LAYERS))
+            self.mode = "idle"
+            self.map_name = None
+            if link is not None:
+                link.forget_map()
+                link.forget_tf()
 
     def _stop(self, name: str):
         p = self._procs.pop(name, None)
@@ -450,12 +574,16 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     @app.route("/api/status")
     def status():
         grid, seq = link.map_snapshot()
+        pose = link.pose()
         return jsonify({
+            "mode": modes.mode,
+            "map_name": modes.map_name,
+            "localized": modes.mode == "localize" and pose is not None,
             "modes": modes.status(),
             "detail": modes.detail(),
             "phase": modes.phase,
             "explore_status": link.explore_status,
-            "pose": link.pose(),
+            "pose": pose,
             "map_seq": seq,
             "has_map": grid is not None,
             "maps": list_maps(ws),
@@ -492,14 +620,23 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/mapping/stop", methods=["POST"])
     def mapping_stop():
-        modes.stop_all()
+        modes.stop_all(link)
         return jsonify({"ok": True})
 
     @app.route("/api/explore", methods=["POST"])
     def explore():
         on = bool((request.json or {}).get("on", False))
-        modes.set_explore(on)
-        return jsonify({"ok": True, "exploring": on})
+        if not on:
+            modes.stop_explore()
+            return jsonify({"ok": True})
+        if modes.mode != "mapping":
+            return jsonify({"ok": False, "error": "only while mapping"}), 409
+        # Starting may have to bring Nav2 up first, which takes far longer
+        # than a request should, so hand it to a worker and let the client
+        # follow the phase.
+        threading.Thread(target=modes.start_explore, args=(link,),
+                         daemon=True).start()
+        return jsonify({"ok": True}), 202
 
     @app.route("/api/mapping/save", methods=["POST"])
     def mapping_save():
@@ -508,7 +645,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             return jsonify({"ok": False, "error": "bad map name"}), 400
 
         # Stop exploring first so the robot is still while the graph is sealed.
-        modes.set_explore(False)
+        modes.stop_explore()
         ok, detail = save_map(ws, name)
         return jsonify({"ok": ok, "detail": detail}), (200 if ok else 500)
 
