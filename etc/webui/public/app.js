@@ -223,10 +223,17 @@ function setLive(ok) {
   if (phase && phase !== 'idle' && phase !== 'mapping') {
     $('state').textContent = phase + '…';        // e.g. "waiting for nav2…"
   } else if (mode === 'mapping') {
-    $('state').textContent = modes.explore
-      ? (exploreStatus === 'exploration_complete' ? 'explored — nothing left'
-                                                  : 'exploring')
-      : 'mapping — drive with the stick';
+    if (nav.state === 'active' && nav.distance != null) {
+      $('state').textContent = `driving — ${nav.distance.toFixed(1)} m to go`;
+    } else if (nav.state === 'pending') {
+      $('state').textContent = 'sending goal…';
+    } else if (modes.explore) {
+      $('state').textContent =
+        exploreStatus === 'exploration_complete' ? 'explored — nothing left'
+                                                 : 'exploring';
+    } else {
+      $('state').textContent = 'mapping — drive with the stick';
+    }
   } else if (mode === 'localize') {
     if (nav.state === 'active' && nav.distance != null) {
       $('state').textContent = `driving — ${nav.distance.toFixed(1)} m to go`;
@@ -284,13 +291,14 @@ function renderControls() {
   $('save').classList.toggle('hidden', !mapping);
   $('setpose').classList.toggle('hidden', !loc);
   $('setpose').classList.toggle('armed', armed === 'pose');
-  $('goto').classList.toggle('hidden', !loc);
+  // Goals work while mapping too — cartographer supplies the pose, so the
+  // only precondition is having one.
+  $('goto').classList.toggle('hidden', mode === 'idle');
   $('goto').classList.toggle('armed', armed === 'goal');
-  // Nav2 needs a pose before it can even start, so offer this only once
-  // AMCL knows where we are.
-  $('goto').disabled = !localized;
+  $('goto').disabled = !pose;
   $('cancelgoal').classList.toggle(
-    'hidden', !(loc && (nav.state === 'active' || nav.state === 'pending')));
+    'hidden', !(mode !== 'idle'
+                && (nav.state === 'active' || nav.state === 'pending')));
   $('changemap').classList.toggle('hidden', !loc);
   // Manual driving is available in both modes.
   $('stick').classList.toggle('hidden', mode === 'idle');

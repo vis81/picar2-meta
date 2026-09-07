@@ -783,7 +783,8 @@ class ModeStack:
         """Worker: bring Nav2 up, then send the goal that asked for it."""
         gen = self._join()
         with self._busy:
-            if not self._current(gen) or self.mode != "localize":
+            if not self._current(gen) or self.mode not in ("localize",
+                                                           "mapping"):
                 return
             try:
                 if not self.ensure_nav2(link, gen):
@@ -804,7 +805,8 @@ class ModeStack:
                            and link.nav_state == "pending"):
                         time.sleep(0.1)
                     if link.nav_state != "rejected":
-                        self.phase = "localized"
+                        self.phase = ("mapping" if self.mode == "mapping"
+                                      else "localized")
                         return
                     time.sleep(1.0)
                 if self._current(gen):
@@ -1084,9 +1086,9 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/goal", methods=["POST"])
     def goal():
-        if modes.mode != "localize":
+        if modes.mode not in ("localize", "mapping"):
             return jsonify({"ok": False,
-                            "error": "only in localize mode"}), 409
+                            "error": "start a mode first"}), 409
         b = body()
         try:
             x = float(b["x"]); y = float(b["y"]); yaw = float(b["yaw"])
@@ -1094,7 +1096,16 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
         if link.pose() is None:
             return jsonify({"ok": False,
-                            "error": "set the robot's position first"}), 409
+                            "error": ("set the robot's position first"
+                                      if modes.mode == "localize"
+                                      else "waiting for the map")}), 409
+
+        # explore_lite drives by sending its own NavigateToPose goals, so
+        # leaving it running would have the two of you preempting each other
+        # every few seconds. Choosing a destination by hand means you are
+        # steering now.
+        if modes.running("explore"):
+            modes.stop_explore()
 
         if not modes.running("nav2"):
             # First goal in this mode brings Nav2 up, which is far too slow
