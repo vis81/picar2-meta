@@ -878,20 +878,51 @@ def save_map(ws: str, name: str) -> tuple[bool, str]:
 
 
 def list_maps(ws: str) -> list[dict]:
+    """Every saved map, by base name.
+
+    Enumerating only *.pbstream would hide exactly the maps AMCL can use:
+    a pgm+yaml pair from slam_toolbox, or one copied in by hand, has no
+    pbstream at all. A yaml only counts when its image sits beside it,
+    which keeps stray config files out of the picker — maps/ also collects
+    slam_toolbox .posegraph/.data pairs.
+    """
     maps = os.path.join(ws, "maps")
     if not os.path.isdir(maps):
         return []
-    out = []
-    for f in sorted(os.listdir(maps)):
+
+    found: dict[str, dict] = {}
+    names = sorted(os.listdir(maps))
+    for f in names:
         if f.endswith(".pbstream"):
-            name = f[: -len(".pbstream")]
-            path = os.path.join(maps, f)
-            out.append({
-                "name": name,
-                "size": os.path.getsize(path),
-                "mtime": int(os.path.getmtime(path)),
-                "has_grid": os.path.exists(os.path.join(maps, name + ".yaml")),
-            })
+            found.setdefault(f[: -len(".pbstream")], {})["pbstream"] = f
+        elif f.endswith(".yaml"):
+            base = f[: -len(".yaml")]
+            if any(os.path.exists(os.path.join(maps, base + ext))
+                   for ext in (".pgm", ".png")):
+                found.setdefault(base, {})["grid"] = f
+
+    out = []
+    for name in sorted(found):
+        which = found[name]
+        # Age from the yaml, since that is what AMCL loads and what the save
+        # wrote last. Size from the image or the pbstream — the yaml is a
+        # couple of hundred bytes and would show as 0.0 MB.
+        ref = which.get("grid") or which.get("pbstream")
+        big = next((f"{name}{ext}" for ext in (".pgm", ".png")
+                    if os.path.exists(os.path.join(maps, name + ext))),
+                   which.get("pbstream") or ref)
+        try:
+            size = os.path.getsize(os.path.join(maps, big))
+            mtime = int(os.path.getmtime(os.path.join(maps, ref)))
+        except OSError:
+            continue
+        out.append({
+            "name": name,
+            "size": size,
+            "mtime": mtime,
+            "has_grid": "grid" in which,
+            "has_pbstream": "pbstream" in which,
+        })
     return out
 
 
