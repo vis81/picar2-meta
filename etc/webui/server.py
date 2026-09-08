@@ -602,10 +602,12 @@ class ModeStack:
 
         if not self._start_cartographer(link, gen):
             return
-        # Nav2 is deliberately not started. Driving by hand needs only
-        # cartographer, so this reaches a usable joystick in about ten
-        # seconds rather than the minute or more Nav2's costmap gate costs.
         self.phase = "mapping"
+        # The joystick is usable now — that is why the mode does not wait
+        # for Nav2. Bring it up in the background so the autonomous
+        # controls can enable themselves when it is genuinely ready.
+        threading.Thread(target=self.prepare_nav2, args=(link,),
+                         daemon=True).start()
 
     def _to_localize(self, link: "RobotLink", gen: int,
                      map_yaml: str, map_name: str):
@@ -704,6 +706,11 @@ class ModeStack:
                 return
             if link.has_map():
                 self.phase = "mapping"
+                # _to_mapping returned before it could start Nav2, so pick
+                # that up here too — otherwise a late-clearing wedge leaves
+                # the autonomous controls greyed out for the whole session.
+                threading.Thread(target=self.prepare_nav2, args=(link,),
+                                 daemon=True).start()
                 return
 
     def _diagnose_no_map(self) -> str:
@@ -788,21 +795,26 @@ class ModeStack:
     def prepare_nav2(self, link: "RobotLink"):
         """Worker: bring Nav2 up now that a pose exists.
 
-        Localize mode exists to navigate, and Nav2 cannot start before an
-        initial pose is set, so this runs the moment one is. Doing it here
-        rather than on the first goal is what lets the UI disable "Go to"
+        Nav2 cannot start before a pose exists — its costmap blocks on
+        map→base_footprint at activation — so this runs at the first moment
+        one does: when the map appears while mapping, and when the initial
+        pose is set while localizing. Doing it here rather than on the
+        first goal is what lets the UI grey out the autonomous controls
         honestly instead of accepting a press it cannot act on for a
-        minute. Manual driving keeps working throughout.
+        minute. Manual driving keeps working throughout, which is the point
+        of not simply blocking the mode on Nav2.
         """
         gen = self._join()
         with self._busy:
-            if not self._current(gen) or self.mode != "localize":
+            if not self._current(gen) or self.mode not in ("localize",
+                                                           "mapping"):
                 return
             if self.running("nav2"):
                 return
             try:
                 if self.ensure_nav2(link, gen) and self._current(gen):
-                    self.phase = "localized"
+                    self.phase = ("mapping" if self.mode == "mapping"
+                                  else "localized")
             except Exception as e:
                 self.phase = f"error: {type(e).__name__}: {e}"
 

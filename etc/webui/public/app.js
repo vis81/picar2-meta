@@ -222,7 +222,10 @@ function setLive(ok) {
   if (!ok) { $('state').textContent = 'no connection'; return; }
   // Any phase the server invents is shown verbatim, so new ones need no
   // client change.
-  if (phase && phase !== 'idle' && phase !== 'mapping') {
+  if (mode === 'mapping' && phase === 'waiting for nav2') {
+    // Do not let this read like the mode is blocked — you can drive now.
+    $('state').textContent = 'mapping — drive now, navigation starting…';
+  } else if (phase && phase !== 'idle' && phase !== 'mapping') {
     $('state').textContent = phase + '…';        // e.g. "waiting for nav2…"
   } else if (mode === 'mapping') {
     if (nav.state === 'active' && nav.distance != null) {
@@ -299,13 +302,11 @@ function renderControls() {
   // only precondition is having one.
   $('goto').classList.toggle('hidden', mode === 'idle');
   $('goto').classList.toggle('armed', armed === 'goal');
-  // In localize, Nav2 is started for you as soon as the pose is set, so
-  // the button can wait until it can actually be acted on. In mapping,
-  // Nav2 is deliberately not running — pressing this is what starts it,
-  // so gating on readiness there would leave a button that never enables.
-  $('goto').disabled = loc ? !navReady : !pose;
-  $('goto').textContent = (loc && pose && !navReady)
-    ? 'Go to… (starting)' : 'Go to…';
+  // Nav2 is brought up for you in both modes as soon as a pose exists, so
+  // these can wait until it can actually be acted on rather than swallowing
+  // a press for a minute.
+  $('goto').disabled = !navReady;
+  $('goto').textContent = (pose && !navReady) ? 'Go to… (starting)' : 'Go to…';
   $('cancelgoal').classList.toggle(
     'hidden', !(mode !== 'idle'
                 && (nav.state === 'active' || nav.state === 'pending')));
@@ -313,11 +314,16 @@ function renderControls() {
   // Manual driving is available in both modes.
   $('stick').classList.toggle('hidden', mode === 'idle');
 
-  // Nav2 is not running until this is pressed, so the off state is an offer
-  // to start exploring, not to resume something paused.
   $('explore').textContent = !modes.explore ? 'Explore automatically'
     : exploreStatus === 'exploration_complete' ? 'Search again'
     : 'Pause exploring';
+  // Only the "start exploring" press needs Nav2. Pausing, resuming a
+  // stalled explorer and stopping must stay live whatever Nav2 is doing —
+  // greying out the way to stop a moving robot would be a poor trade.
+  $('explore').disabled = !modes.explore && !navReady;
+  if (!modes.explore && !navReady && mapping) {
+    $('explore').textContent = 'Explore automatically (starting)';
+  }
   if (mode !== 'idle') $('hint').classList.add('hidden');
 }
 
