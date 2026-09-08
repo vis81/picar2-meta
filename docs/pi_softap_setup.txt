@@ -1,0 +1,162 @@
+0. Sanity check
+
+# Confirm STA is up
+nmcli device status
+iw dev wlan0 info | grep -E 'channel|type'
+
+# Confirm chip supports AP+STA on one radio
+iw list | grep -A2 'valid interface combinations'
+# Look for a line with "{ AP, managed } <= 2" or similar
+
+If the chip can't do {AP, managed} you're stuck — but on Pi 4 / BCM43455 it can.
+
+1. Set country code (mandatory for 5 GHz; good practice for 2.4)
+
+sudo raspi-config nonint do_wifi_country US     # or your code
+# Verify:
+iw reg get
+
+2. Tell NetworkManager to manage uap0 before it exists
+
+
+sudo tee /etc/NetworkManager/conf.d/10-uap0.conf >/dev/null <<'EOF'
+[device-uap0]
+match-device=interface-name:uap0
+managed=true
+EOF
+
+sudo systemctl reload NetworkManager
+
+
+
+sudo tee /etc/systemd/system/uap0.service >/dev/null <<'EOF'
+[Unit]
+Description=Create uap0 virtual AP interface on wlan0
+After=sys-subsystem-net-devices-wlan0.device
+Before=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iw dev wlan0 interface add uap0 type __ap
+ExecStartPost=/sbin/ip link set uap0 up
+ExecStop=/sbin/iw dev uap0 del
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now uap0.service
+
+
+# Verify
+ip link show uap0
+
+4. Find what channel STA is on (AP must match)
+
+STA_CHAN=$(iw dev wlan0 info | awk '/channel/ {print $2; exit}')
+echo "STA is on channel $STA_CHAN"
+
+If empty, your STA isn't connected yet — connect it first, then re-read.
+
+5. Create the AP connection bound to uap0
+
+
+sudo nmcli connection add \
+      type wifi \
+      ifname uap0 \
+      con-name picar-ap \
+      autoconnect yes \
+      ssid picar-ap \
+      -- \
+      802-11-wireless.mode ap \
+      802-11-wireless.band a \
+      802-11-wireless.channel "$STA_CHAN" \
+      ipv4.method shared \
+      ipv6.method disabled \
+      802-11-wireless-security.key-mgmt wpa-psk \
+      802-11-wireless-security.psk 'your-password-here' \
+      802-11-wireless-security.proto rsn \
+      802-11-wireless-security.pairwise ccmp \
+      802-11-wireless-security.group ccmp
+
+
+6. Verify the config stuck
+
+nmcli -f 802-11-wireless.mode,802-11-wireless.band,802-11-wireless.channel,\
+802-11-wireless-security.key-mgmt,802-11-wireless-security.psk,ipv4.method,connection.interface-name \
+connection show picar-ap
+
+You should see mode: ap, key-mgmt: wpa-psk, psk non-empty, ipv4.method: shared, interface-name: uap0. If any field is wrong, fix it with nmcli connection modify picar-ap <key> <value> before bringing the connection up.
+
+7. Bring it up
+
+sudo nmcli connection up picar-ap
+nmcli device status
+
+Both wlan0 (your home WiFi STA) and uap0 (picar-ap) should show connected.
+
+8. Smoke test
+
+# Channel should match STA
+iw dev uap0 info | grep channel
+iw dev wlan0 info | grep channel
+
+# AP should have an IP
+ip addr show uap0
+# Expect 10.42.0.1/24 (NM's default shared subnet) or similar
+
+# dnsmasq should be running (NM spawns it for ipv4.method=shared)
+ps -ef | grep dnsmasq | grep -v grep
+
+Connect a phone to picar-ap. It should get a DHCP lease in 10.42.0.x and have internet through wlan0.
+
+9. If connection up fails
+
+journalctl -u NetworkManager -n 100 --no-pager
+sudo dmesg | tail -50
+
+Common failures:
+- ip-config-unavailable → ipv4.method is not shared (step 5 didn't take). Re-run the modify.
+- AP starts but no clients can associate → country code missing or PSK didn't stick.
+- uap0 disappears after a few seconds → MAC_CONFLICT; set a unique MAC: sudo nmcli connection modify picar-ap 802-11-wireless.cloned-mac-address $(printf '02:%02x:%02x:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
+
+10. Reboot test
+
+sudo reboot
+# After reboot:
+nmcli device status
+
+Both wlan0 STA and uap0 AP should come up automatically — the systemd unit creates uap0, NM auto-connects both saved connections.
+
+
+
+❯ how to modify password and ssid?                                                                                                                                                                                                                                                                                                               
+
+● Modify either field on the existing connection, then re-apply.
+
+  # Change SSID
+  sudo nmcli connection modify picar-ap 802-11-wireless.ssid 'new-ssid'
+ 
+  # Change password
+  sudo nmcli connection modify picar-ap 802-11-wireless-security.psk 'new-password'
+
+  # Apply (clients will be kicked and need to reconnect with new creds)
+  sudo nmcli connection down picar-ap
+  sudo nmcli connection up picar-ap
+ 
+  Verify:
+  nmcli -s -f 802-11-wireless.ssid,802-11-wireless-security.psk connection show picar-ap
+  The -s flag is required to actually print the PSK — without it, secrets are hidden.
+  
+  A few notes:
+  
+  - SSID with spaces or special chars: keep the quotes around the value. nmcli passes the literal string through.
+  - Password length: WPA2-PSK requires 8–63 ASCII chars (or exactly 64 hex). Anything shorter is rejected at connection-up time, not at modify time.
+  - No reboot needed. down + up reloads the AP cleanly with the new config.
+  - Forgot the current password? nmcli -s connection show picar-ap | grep psk reveals it.
+  
+  Task tools aren't relevant here — this is a single one-off config change, not a multi-step workflow worth tracking.

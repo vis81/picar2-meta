@@ -1,0 +1,8 @@
+12.6V
+
+STM32 halt - 49 mA
+STM32 only - 62 mA
+STM32 + PI4 pwr off - 73 mA
+STM32 + PI4 idle - 260 mA
+
+
