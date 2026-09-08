@@ -384,6 +384,13 @@ class RobotLink(Node):
         except Exception:                # in _on_nav_result as "canceled"
             pass
 
+    def nav_server_ready(self) -> bool:
+        """Cheap, non-blocking check that the action server is discovered."""
+        try:
+            return self._nav.server_is_ready()
+        except Exception:
+            return False
+
     def nav_status(self) -> dict:
         return {"state": self.nav_state, "goal": self.nav_goal,
                 "distance": self.nav_distance}
@@ -778,6 +785,37 @@ class ModeStack:
                              daemon=True).start()
         self.phase = "mapping"
 
+    def prepare_nav2(self, link: "RobotLink"):
+        """Worker: bring Nav2 up now that a pose exists.
+
+        Localize mode exists to navigate, and Nav2 cannot start before an
+        initial pose is set, so this runs the moment one is. Doing it here
+        rather than on the first goal is what lets the UI disable "Go to"
+        honestly instead of accepting a press it cannot act on for a
+        minute. Manual driving keeps working throughout.
+        """
+        gen = self._join()
+        with self._busy:
+            if not self._current(gen) or self.mode != "localize":
+                return
+            if self.running("nav2"):
+                return
+            try:
+                if self.ensure_nav2(link, gen) and self._current(gen):
+                    self.phase = "localized"
+            except Exception as e:
+                self.phase = f"error: {type(e).__name__}: {e}"
+
+    def nav_ready(self, link: "RobotLink") -> bool:
+        """Nav2 is up and can take a goal.
+
+        The costmap going ready is not enough on its own — it beats
+        bt_navigator's activation by about a third of a second, and a goal
+        sent into that gap is rejected outright.
+        """
+        return (self.running("nav2") and link.costmap_ready()
+                and link.nav_server_ready())
+
     def goal_after_nav2(self, link: "RobotLink", x: float, y: float,
                         yaw: float):
         """Worker: bring Nav2 up, then send the goal that asked for it."""
@@ -1010,6 +1048,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "map_seq": seq,
             "has_map": grid is not None,
             "nav": link.nav_status(),
+            "nav_ready": modes.nav_ready(link),
             "maps": list_maps(ws),
         })
 
@@ -1079,6 +1118,10 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         ok, err = link.set_initial_pose(x, y, yaw)
         if ok:
             modes.phase = "localized"
+            # Now that a pose exists Nav2 can start, so get on with it
+            # rather than making the first goal wait a minute for it.
+            threading.Thread(target=modes.prepare_nav2, args=(link,),
+                             daemon=True).start()
             return jsonify({"ok": True})
         # 503 if AMCL is not there yet, 504 if it is but did not take it.
         code = 503 if "isn't running" in err else 504

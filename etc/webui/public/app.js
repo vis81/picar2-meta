@@ -26,6 +26,7 @@ let lastSaved = null;      // preselect what you just saved when localizing
 let armed = null;          // null | 'pose' — a map tap is being awaited
 let drag = null;           // {a, p} in grid cells while placing
 let nav = { state: 'idle', goal: null, distance: null };
+let navReady = false;      // nav2 up and able to take a goal
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -204,6 +205,7 @@ async function poll() {
     localized = !!s.localized;
     maps = s.maps || [];
     nav = s.nav || { state: 'idle', goal: null, distance: null };
+    navReady = !!s.nav_ready;
     reportFailures();
     setLive(true);
 
@@ -245,6 +247,8 @@ function setLive(ok) {
       $('state').textContent = 'could not get there';
     } else if (nav.state === 'canceled') {
       $('state').textContent = 'stopped — you took over';
+    } else if (localized && !navReady) {
+      $('state').textContent = 'localized — starting navigation…';
     } else {
       $('state').textContent = localized ? `localized on ${mapName}`
                                          : 'position unknown';
@@ -295,7 +299,13 @@ function renderControls() {
   // only precondition is having one.
   $('goto').classList.toggle('hidden', mode === 'idle');
   $('goto').classList.toggle('armed', armed === 'goal');
-  $('goto').disabled = !pose;
+  // In localize, Nav2 is started for you as soon as the pose is set, so
+  // the button can wait until it can actually be acted on. In mapping,
+  // Nav2 is deliberately not running — pressing this is what starts it,
+  // so gating on readiness there would leave a button that never enables.
+  $('goto').disabled = loc ? !navReady : !pose;
+  $('goto').textContent = (loc && pose && !navReady)
+    ? 'Go to… (starting)' : 'Go to…';
   $('cancelgoal').classList.toggle(
     'hidden', !(mode !== 'idle'
                 && (nav.state === 'active' || nav.state === 'pending')));
