@@ -34,6 +34,7 @@ import time
 
 import rclpy
 import numpy as np
+import yaml
 from flask import Flask, Response, jsonify, request, send_from_directory
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
@@ -649,6 +650,7 @@ class ModeStack:
         # lazily within a mode: "mapping" may or may not have Nav2 yet.
         self.mode = "idle"          # idle | mapping | localize
         self.map_name = None        # localize: which saved map is loaded
+        self.ws = None              # set by build_app; needed to load waypoints
         self.phase = "idle"
         os.makedirs(self.LOG_DIR, exist_ok=True)
 
@@ -814,6 +816,10 @@ class ModeStack:
         link.forget_tf()
         self.mode = "localize"
         self.map_name = map_name
+        # forget_map() has just cleared the waypoints, which is right — they
+        # belong to whichever map is loaded. Bring back this map's own.
+        if self.ws:
+            link.waypoints = load_waypoints(self.ws, map_name)
 
         with self._lock:
             self._launch("amcl", "amcl.launch.py", {"map_yaml": map_yaml})
@@ -1165,6 +1171,57 @@ def save_map(ws: str, name: str) -> tuple[bool, str]:
     return True, base
 
 
+def waypoints_path(ws: str, map_name: str) -> str:
+    return os.path.join(ws, "maps", f"{map_name}.waypoints.yaml")
+
+
+def save_waypoints(ws: str, map_name: str, wps: list[dict]) -> None:
+    """Write a map's waypoints beside its grid.
+
+    Uses the layout scripts/loop_waypoints.py already reads — the RViz Nav2
+    panel's "Save Waypoints" format, orientation w-first — so the same file
+    drives either the phone or that script.
+    """
+    if not map_name:
+        return
+    maps = os.path.join(ws, "maps")
+    os.makedirs(maps, exist_ok=True)
+    body = {}
+    for i, w in enumerate(wps):
+        yaw = float(w["yaw"])
+        body[f"waypoint{i}"] = {
+            "pose": [float(w["x"]), float(w["y"]), 0.0],
+            "orientation": [math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)],
+            "auto_heading": bool(w.get("auto", False)),
+        }
+    tmp = waypoints_path(ws, map_name) + ".tmp"
+    with open(tmp, "w") as f:
+        yaml.safe_dump({"waypoints": body}, f, sort_keys=False)
+    os.replace(tmp, waypoints_path(ws, map_name))   # atomic
+
+
+def load_waypoints(ws: str, map_name: str) -> list[dict]:
+    try:
+        with open(waypoints_path(ws, map_name)) as f:
+            doc = yaml.safe_load(f) or {}
+    except OSError:
+        return []
+    out = []
+    for key in sorted((doc.get("waypoints") or {}),
+                      key=lambda k: int("".join(c for c in k if c.isdigit()) or 0)):
+        w = doc["waypoints"][key]
+        try:
+            x, y = float(w["pose"][0]), float(w["pose"][1])
+            o = w["orientation"]                     # w, x, y, z
+            yaw = math.atan2(2.0 * float(o[0]) * float(o[3]),
+                             1.0 - 2.0 * float(o[3]) ** 2)
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        out.append({"x": x, "y": y, "yaw": yaw,
+                    "auto": bool(w.get("auto_heading", False))})
+    return out
+
+
 def list_maps(ws: str) -> list[dict]:
     """Every saved map, by base name.
 
@@ -1216,6 +1273,17 @@ def list_maps(ws: str) -> list[dict]:
 
 def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     app = Flask(__name__, static_folder=None)
+    modes.ws = ws
+
+    def persist():
+        """Waypoints belong to a map, so they are only saveable once one is
+        named. In mapping mode the map has no name until it is saved, and
+        mapping_save writes them out at that point."""
+        if modes.mode == "localize" and modes.map_name:
+            try:
+                save_waypoints(ws, modes.map_name, link.waypoints)
+            except OSError:
+                pass
 
     def body() -> dict:
         """request.json is whatever was sent — a bare string or list would
@@ -1378,16 +1446,19 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         except (KeyError, TypeError, ValueError):
             return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
         count = link.add_waypoint(x, y, yaw, bool(b.get("auto", False)))
+        persist()
         return jsonify({"ok": True, "count": count})
 
     @app.route("/api/waypoint/undo", methods=["POST"])
     def waypoint_undo():
         link.drop_last_waypoint()
+        persist()
         return jsonify({"ok": True, "count": len(link.waypoints)})
 
     @app.route("/api/waypoints/clear", methods=["POST"])
     def waypoints_clear():
         link.clear_waypoints()
+        persist()
         return jsonify({"ok": True})
 
     @app.route("/api/route/start", methods=["POST"])
@@ -1458,6 +1529,13 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         # Stop exploring first so the robot is still while the graph is sealed.
         modes.stop_explore()
         ok, detail = save_map(ws, name)
+        if ok and link.waypoints:
+            # The route was placed on this map while mapping it, so it keeps
+            # its meaning once the map has a name.
+            try:
+                save_waypoints(ws, name, link.waypoints)
+            except OSError:
+                pass
         return jsonify({"ok": ok, "detail": detail}), (200 if ok else 500)
 
     @app.route("/api/explore/resume", methods=["POST"])
