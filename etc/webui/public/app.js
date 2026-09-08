@@ -27,6 +27,8 @@ let armed = null;          // null | 'pose' — a map tap is being awaited
 let drag = null;           // {a, p} in grid cells while placing
 let nav = { state: 'idle', goal: null, distance: null };
 let navReady = false;      // nav2 up and able to take a goal
+let route = { waypoints: [], active: false, loop: false, index: null,
+              passed: 0, error: null };
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
 // ── map rendering ─────────────────────────────────────────────────────
@@ -117,10 +119,57 @@ function draw() {
       ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
     }
 
-    if (nav.goal) drawGoal();
+    if (route.waypoints && route.waypoints.length) drawRoute();
+    if (nav.goal && !route.active) drawGoal();
     if (drag) drawPlacement();
   }
   requestAnimationFrame(draw);
+}
+
+// The waypoint list, numbered, joined in order. The one being driven to is
+// highlighted so it is obvious where in the lap the robot is.
+function drawRoute() {
+  const wp = route.waypoints;
+  const pt = (w) => ({ x: (w.x - mapData.ox) / mapData.res,
+                       y: mapData.h - (w.y - mapData.oy) / mapData.res });
+  const pts = wp.map(pt);
+  const r = Math.max(7 / view.scale, 4);
+
+  // Joining line, closed into a ring when looping so the lap reads as one.
+  if (pts.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (const p of pts.slice(1)) ctx.lineTo(p.x, p.y);
+    if (route.loop) ctx.closePath();
+    ctx.strokeStyle = route.active ? 'rgba(61,220,132,.75)' : 'rgba(139,149,165,.5)';
+    ctx.lineWidth = 1.5 / view.scale;
+    ctx.setLineDash(route.active ? [] : [6 / view.scale, 4 / view.scale]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  pts.forEach((p, i) => {
+    const next = route.active && i === route.index;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = next ? '#3ddc84' : 'rgba(26,31,40,.85)';
+    ctx.fill();
+    ctx.strokeStyle = next ? '#3ddc84' : (route.active ? '#3ddc84' : '#8b95a5');
+    ctx.lineWidth = 2 / view.scale;
+    ctx.stroke();
+    // heading tick
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + Math.cos(wp[i].yaw) * r * 2,
+               p.y - Math.sin(wp[i].yaw) * r * 2);
+    ctx.stroke();
+    const fs = Math.max(10 / view.scale, 6);
+    ctx.fillStyle = next ? '#06101f' : '#e8eaed';
+    ctx.font = `${fs}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), p.x, p.y);
+  });
 }
 
 // Where Nav2 is heading. Greys out once the goal is over, rather than
@@ -206,6 +255,7 @@ async function poll() {
     maps = s.maps || [];
     nav = s.nav || { state: 'idle', goal: null, distance: null };
     navReady = !!s.nav_ready;
+    route = s.route || route;
     reportFailures();
     setLive(true);
 
@@ -220,6 +270,14 @@ async function poll() {
 function setLive(ok) {
   $('dot').className = 'dot ' + (ok ? 'live' : 'dead');
   if (!ok) { $('state').textContent = 'no connection'; return; }
+  if (route.active) {
+    const n = route.waypoints.length;
+    const at = route.index == null ? '' : ` — heading for ${route.index + 1}/${n}`;
+    $('state').textContent =
+      (route.loop ? 'looping route' : 'driving route') + at;
+    return;
+  }
+  if (route.error) { $('state').textContent = route.error; return; }
   // Any phase the server invents is shown verbatim, so new ones need no
   // client change.
   if (mode === 'mapping' && phase === 'waiting for nav2') {
@@ -311,6 +369,14 @@ function renderControls() {
     'hidden', !(mode !== 'idle'
                 && (nav.state === 'active' || nav.state === 'pending')));
   $('changemap').classList.toggle('hidden', !loc);
+  // Routes work in both modes. While one is running the button becomes the
+  // way to stop it, so stopping is always one tap from the main screen
+  // rather than buried in the sheet.
+  $('route').classList.toggle('hidden', mode === 'idle');
+  $('route').classList.toggle('danger', route.active);
+  $('route').textContent = route.active
+    ? 'Stop route'
+    : (route.waypoints.length ? `Route (${route.waypoints.length})` : 'Route');
   // Manual driving is available in both modes.
   $('stick').classList.toggle('hidden', mode === 'idle');
 
@@ -398,6 +464,8 @@ function arm(what) {
     hint.classList.remove('hidden');
     hint.textContent = armed === 'goal'
       ? 'Tap where to go — drag to set the direction to arrive facing.'
+      : armed === 'waypoint'
+      ? 'Tap to drop a waypoint — drag to set the heading to arrive on.'
       : 'Tap where the robot is — drag to point the way it faces.';
   } else {
     hint.classList.add('hidden');
@@ -407,6 +475,44 @@ function arm(what) {
 
 $('setpose').onclick = () => arm(armed === 'pose' ? null : 'pose');
 $('cancel-load').onclick = () => $('mapsheet').classList.add('hidden');
+
+// ── route ─────────────────────────────────────────────────────────────
+
+$('route').onclick = () => {
+  if (route.active) { post('/api/route/stop'); return; }
+  openRoute();
+};
+$('cancel-route').onclick = () => $('routesheet').classList.add('hidden');
+$('wpundo').onclick = async () => { await post('/api/waypoint/undo'); renderRoute(); };
+$('wpclear').onclick = async () => { await post('/api/waypoints/clear'); renderRoute(); };
+$('wpadd').onclick = () => {
+  $('routesheet').classList.add('hidden');
+  arm('waypoint');
+};
+$('routego').onclick = async () => {
+  $('routeerr').textContent = '';
+  const r = await (await post('/api/route/start',
+                              { loop: $('loop').checked })).json();
+  if (r.ok) $('routesheet').classList.add('hidden');
+  else $('routeerr').textContent = r.error || 'Could not start the route.';
+};
+
+function openRoute() {
+  $('routeerr').textContent = '';
+  $('loop').checked = route.loop;
+  renderRoute();
+  $('routesheet').classList.remove('hidden');
+}
+
+function renderRoute() {
+  const l = $('wplist');
+  const wp = route.waypoints || [];
+  l.innerHTML = wp.length
+    ? wp.map((w, i) => `<div class="maprow">${i + 1}. ` +
+        `<small>${w.x.toFixed(2)}, ${w.y.toFixed(2)} m</small></div>`).join('')
+    : '<p>No waypoints yet. <b>Add waypoint</b>, then tap the map.</p>';
+  $('routego').disabled = wp.length < 2 || !navReady;
+}
 
 function openMapPicker() {
   const list = $('maplist');
@@ -589,6 +695,12 @@ canvas.addEventListener('touchend', () => {
   pan = null; pinch = null;
 });
 
+// True when the drag was too short to mean a direction.
+function dragIsTap() {
+  const dx = drag.p.gx - drag.a.gx, dy = drag.p.gy - drag.a.gy;
+  return Math.hypot(dx, dy) * view.scale < 10;
+}
+
 function dragYaw() {
   const dx = drag.p.gx - drag.a.gx, dy = drag.p.gy - drag.a.gy;
   // Below about 10 screen pixels the direction is noise, so keep the
@@ -602,8 +714,14 @@ async function commitDrag() {
   if (!mapData) return;
   const m = gridToMetres(drag.a);
   const body = { x: m.x, y: m.y, yaw: dragYaw() };
-  const isGoal = armed === 'goal';
-  const url = isGoal ? '/api/goal' : '/api/initialpose';
+  // A plain tap on a waypoint means "just go through here" — let the route
+  // point it at the next one rather than freezing whatever heading the
+  // robot happened to have, which the planner often cannot achieve.
+  if (armed === 'waypoint' && dragIsTap()) body.auto = true;
+  const kind = armed;
+  const url = kind === 'goal' ? '/api/goal'
+            : kind === 'waypoint' ? '/api/waypoint'
+            : '/api/initialpose';
   const hint = $('hint');
   hint.dataset.showing = '';
   try {
@@ -611,10 +729,13 @@ async function commitDrag() {
     if (!r.ok) {
       hint.classList.remove('hidden');
       hint.textContent = r.error ||
-        (isGoal ? 'Could not send the goal.'
-                : 'Could not set the position.');
+        (kind === 'goal' ? 'Could not send the goal.'
+         : kind === 'waypoint' ? 'Could not add the waypoint.'
+         : 'Could not set the position.');
     } else {
       hint.classList.add('hidden');
+      // Straight back to the sheet so a run of waypoints is quick to place.
+      if (kind === 'waypoint') { route.waypoints.push(body); openRoute(); }
     }
   } catch (err) {
     hint.classList.remove('hidden');

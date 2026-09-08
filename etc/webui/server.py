@@ -109,6 +109,15 @@ class RobotLink(Node):
         self.nav_state = "idle"
         self.nav_goal = None
         self.nav_distance = None
+
+        # ── routes ───────────────────────────────────────────────────────
+        self.waypoints: list[dict] = []
+        self.route_active = False
+        self.route_loop = False
+        self.route_idx = 0
+        self.route_passed = 0
+        self.route_error = None
+        self._route_poses: list[dict] = []
         self.create_subscription(
             ExploreStatus, "/explore/status", self._on_explore_status, 10)
         self.explore_status = None
@@ -168,6 +177,12 @@ class RobotLink(Node):
         self._costmap_free = 0
         self.explore_status = None
         self.forget_nav()
+        # Waypoints are map-frame coordinates and a new mode brings a new
+        # map, so keeping them would point the robot at places that no
+        # longer mean anything.
+        self.waypoints = []
+        self.route_passed = 0
+        self.route_error = None
 
     def forget_tf(self):
         """Treat transforms older than now as belonging to the previous mode.
@@ -365,6 +380,9 @@ class RobotLink(Node):
         }.get(status, "aborted")
         self._goal_handle = None
         self.nav_distance = None
+        # A route is a chain of these, so advance it from the same place a
+        # single goal reports — one result path, one set of guards.
+        self._route_on_goal_done(self.nav_state)
 
     def cancel_goal(self):
         """Idempotent, and safe before the goal has been accepted."""
@@ -396,6 +414,7 @@ class RobotLink(Node):
                 "distance": self.nav_distance}
 
     def forget_nav(self):
+        self.route_stop()
         self.cancel_goal()
         self._goal_seq += 1             # orphan any callback still in flight
         self._cancel_pending = False
@@ -403,6 +422,177 @@ class RobotLink(Node):
         self.nav_state = "idle"
         self.nav_goal = None
         self.nav_distance = None
+
+    # ── routes ───────────────────────────────────────────────────────────
+    # One waypoint at a time through NavigateToPose, advancing when each is
+    # actually reached.
+    #
+    # NavigateThroughPoses with a rolling window keeps the robot moving
+    # between waypoints, but its BT trims goals within RemovePassedGoals'
+    # 0.7 m radius, so waypoints count as reached from well away — and a
+    # window can be trimmed empty and report SUCCEEDED having visibly
+    # missed them. Measured on this robot: a three-waypoint route finished
+    # with the robot 0.75 m from the nearest one. Waypoints a person placed
+    # deliberately deserve the goal checker's 0.25 m, at the cost of a pause
+    # at each.
+    ANCHOR_RADIUS_M = 0.6
+    # Nav2's goal checker wants the robot within xy_goal_tolerance (0.25 m)
+    # and stopped there. A car that cannot turn tighter than 0.5 m often
+    # parks a little outside that and shuffles until the BT gives up —
+    # observed at 0.333 m with the heading already correct to 5 degrees.
+    # A route only needs to pass through a waypoint, so treat "Nav2 gave up
+    # but we are practically on it" as reached and carry on.
+    NEAR_ENOUGH_M = 0.6
+
+    def add_waypoint(self, x: float, y: float, yaw: float,
+                     auto_yaw: bool = False) -> int:
+        self.waypoints.append({"x": float(x), "y": float(y),
+                               "yaw": float(yaw), "auto": bool(auto_yaw)})
+        return len(self.waypoints)
+
+    def clear_waypoints(self):
+        self.route_stop()
+        self.waypoints = []
+
+    def drop_last_waypoint(self):
+        if self.waypoints:
+            self.waypoints.pop()
+
+    def route_start(self, loop: bool):
+        """Begin driving the waypoints. Returns (ok, message)."""
+        if len(self.waypoints) < 2:
+            return False, "add at least two waypoints"
+        if not self._nav.wait_for_server(timeout_sec=2.0):
+            return False, "navigation isn't ready yet"
+
+        # Snapshot, so editing the list mid-route cannot corrupt the run.
+        self._route_poses = self._resolved_waypoints()
+        self.route_loop = bool(loop)
+        self.route_passed = 0
+        self.route_error = None
+        self.route_idx = self._route_first_index()
+        self.route_active = True
+        self._route_send_current()
+        return True, ""
+
+    def _resolved_waypoints(self) -> list[dict]:
+        """Fill in arrival headings the user did not choose.
+
+        An arbitrary heading is the difference between a reachable waypoint
+        and an unreachable one: the planner is a Reeds-Shepp lattice with a
+        0.5 m turning radius, so "arrive here facing that way" can simply
+        have no solution in a small space, and Nav2 answers by running its
+        backup behaviour over and over. Facing the next waypoint is both
+        the natural way to drive a route and nearly always feasible, since
+        it is the direction of travel.
+        """
+        wps = [dict(w) for w in self.waypoints]
+        n = len(wps)
+        for i, w in enumerate(wps):
+            if not w.get("auto"):
+                continue
+            if i + 1 < n:
+                nxt = wps[i + 1]
+            elif self.route_loop and n > 1:
+                nxt = wps[0]
+            else:
+                nxt = None
+            if nxt is not None:
+                w["yaw"] = math.atan2(nxt["y"] - w["y"], nxt["x"] - w["x"])
+            elif n > 1:
+                # Last waypoint of a one-shot route: carry on facing the way
+                # we arrived rather than inventing a turn at the end.
+                prev = wps[i - 1]
+                w["yaw"] = math.atan2(w["y"] - prev["y"], w["x"] - prev["x"])
+        return wps
+
+    def _route_first_index(self) -> int:
+        """Where to begin.
+
+        A loop is a lap you join at the nearest waypoint. A one-shot route
+        is a list the user wrote in order, so it starts at the beginning —
+        starting from the nearest would silently skip everything before it.
+        Either way, if the robot is already standing on a waypoint, begin
+        with the next one rather than driving to where it already is.
+        """
+        n = len(self._route_poses)
+        p = self.pose()
+        if p is None:
+            return 0
+        d = [math.hypot(w["x"] - p["x"], w["y"] - p["y"])
+             for w in self._route_poses]
+        closest = min(range(n), key=lambda i: d[i])
+        on_a_waypoint = d[closest] < self.ANCHOR_RADIUS_M
+
+        if self.route_loop:
+            return (closest + 1) % n if on_a_waypoint else closest
+        if on_a_waypoint and closest == 0:
+            return 1 if n > 1 else 0
+        return 0
+
+    def _route_send_current(self):
+        if not self.route_active:
+            return
+        n = len(self._route_poses)
+        if self.route_idx >= n:
+            self._route_finish("route complete")
+            return
+        wp = self._route_poses[self.route_idx]
+        ok, err = self.send_goal(wp["x"], wp["y"], wp["yaw"])
+        if not ok:
+            self._route_finish(err or "could not send the waypoint")
+
+    def _route_on_goal_done(self, state: str):
+        """Called from the goal result once a waypoint's goal has ended."""
+        if not self.route_active:
+            return
+        if state == "canceled":
+            self._route_finish(None)
+            return
+        if state != "succeeded":
+            wp = self._route_poses[self.route_idx]
+            p = self.pose()
+            near = (p is not None and
+                    math.hypot(p["x"] - wp["x"], p["y"] - wp["y"])
+                    < self.NEAR_ENOUGH_M)
+            if not near:
+                self._route_finish("could not reach waypoint "
+                                   f"{self.route_idx + 1}")
+                return
+            # Close enough — press on rather than abandoning the route for
+            # the sake of a few centimetres.
+
+        self.route_passed += 1
+        n = len(self._route_poses)
+        if self.route_loop:
+            self.route_idx = (self.route_idx + 1) % n
+        else:
+            self.route_idx += 1
+            if self.route_idx >= n:
+                self._route_finish("route complete")
+                return
+        self._route_send_current()
+
+    def _route_finish(self, error):
+        self.route_active = False
+        self.route_error = error
+
+    def route_stop(self):
+        """Idempotent."""
+        if not self.route_active:
+            return
+        self.route_active = False
+        self.cancel_goal()
+
+    def route_status(self) -> dict:
+        return {
+            "waypoints": self.waypoints,
+            "active": self.route_active,
+            "loop": self.route_loop,
+            "index": self.route_idx if self.route_active else None,
+            "passed": self.route_passed,
+            "error": self.route_error,
+        }
 
     # ── drive ────────────────────────────────────────────────────────────
     def set_drive(self, linear: float, angular: float):
@@ -1061,6 +1251,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "has_map": grid is not None,
             "nav": link.nav_status(),
             "nav_ready": modes.nav_ready(link),
+            "route": link.route_status(),
             "maps": list_maps(ws),
         })
 
@@ -1161,6 +1352,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         # steering now.
         if modes.running("explore"):
             modes.stop_explore()
+        link.route_stop()
 
         if not modes.running("nav2"):
             # First goal in this mode brings Nav2 up, which is far too slow
@@ -1176,6 +1368,49 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             return jsonify({"ok": False, "error": err}), 503
         return jsonify({"ok": True}), 202
 
+    @app.route("/api/waypoint", methods=["POST"])
+    def waypoint_add():
+        if modes.mode not in ("localize", "mapping"):
+            return jsonify({"ok": False, "error": "start a mode first"}), 409
+        b = body()
+        try:
+            x = float(b["x"]); y = float(b["y"]); yaw = float(b["yaw"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "need x, y and yaw"}), 400
+        count = link.add_waypoint(x, y, yaw, bool(b.get("auto", False)))
+        return jsonify({"ok": True, "count": count})
+
+    @app.route("/api/waypoint/undo", methods=["POST"])
+    def waypoint_undo():
+        link.drop_last_waypoint()
+        return jsonify({"ok": True, "count": len(link.waypoints)})
+
+    @app.route("/api/waypoints/clear", methods=["POST"])
+    def waypoints_clear():
+        link.clear_waypoints()
+        return jsonify({"ok": True})
+
+    @app.route("/api/route/start", methods=["POST"])
+    def route_start():
+        if modes.mode not in ("localize", "mapping"):
+            return jsonify({"ok": False, "error": "start a mode first"}), 409
+        if not modes.nav_ready(link):
+            return jsonify({"ok": False,
+                            "error": "navigation isn't ready yet"}), 409
+        # explore_lite drives by sending its own goals; it would fight the
+        # route exactly as it fights a single one.
+        if modes.running("explore"):
+            modes.stop_explore()
+        ok, err = link.route_start(bool(body().get("loop", False)))
+        if not ok:
+            return jsonify({"ok": False, "error": err}), 409
+        return jsonify({"ok": True}), 202
+
+    @app.route("/api/route/stop", methods=["POST"])
+    def route_stop():
+        link.route_stop()
+        return jsonify({"ok": True})
+
     @app.route("/api/goal/cancel", methods=["POST"])
     def goal_cancel():
         link.cancel_goal()
@@ -1188,6 +1423,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         # exactly the case where it would fail to cancel.
         if modes.running("explore"):
             modes.stop_explore()
+        link.route_stop()
         link.cancel_goal()
         return ("", 204)
 

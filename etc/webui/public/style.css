@@ -99,6 +99,9 @@ html, body {
            max-height: 45vh; overflow: auto; margin: 4px 0 12px; }
 .maprow { text-align: left; padding: 12px 14px; line-height: 1.35; }
 .maprow small { display: block; color: var(--muted); font-weight: 400; }
+.rowline { display: flex; align-items: center; gap: 10px; margin: 10px 0;
+           font-size: 14px; line-height: 1.35; }
+.rowline input { width: 22px; height: 22px; }
 
 /* ── joystick ───────────────────────────────────────────────────────── */
 .stick {

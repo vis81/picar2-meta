@@ -38,6 +38,7 @@
   <button id="setpose" class="btn hidden">Set position</button>
   <button id="goto" class="btn hidden">Go to…</button>
   <button id="cancelgoal" class="btn danger hidden">Cancel goal</button>
+  <button id="route" class="btn hidden">Route</button>
   <button id="changemap" class="btn hidden">Change map</button>
 </footer>
 
@@ -51,6 +52,28 @@
       <button id="confirm-save" class="btn primary">Save</button>
     </div>
     <div id="saveerr" class="err"></div>
+  </div>
+</div>
+
+<div id="routesheet" class="sheet hidden">
+  <div class="sheet-inner">
+    <h2>Route</h2>
+    <p>Tap the map to drop a waypoint, dragging to set the heading to arrive on.</p>
+    <div id="wplist" class="maplist"></div>
+    <label class="rowline"><input id="loop" type="checkbox"> Loop forever — after the
+      last waypoint, drive back to the first</label>
+    <div class="sheet-buttons">
+      <button id="wpadd" class="btn primary">Add waypoint</button>
+      <button id="wpundo" class="btn">Undo</button>
+    </div>
+    <div class="sheet-buttons">
+      <button id="wpclear" class="btn danger">Clear all</button>
+      <button id="routego" class="btn primary">Start route</button>
+    </div>
+    <div class="sheet-buttons">
+      <button id="cancel-route" class="btn">Close</button>
+    </div>
+    <div id="routeerr" class="err"></div>
   </div>
 </div>
 
