@@ -95,13 +95,23 @@ html, body {
 .seg:disabled { opacity: .45; }
 
 /* ── map picker ─────────────────────────────────────────────────────── */
+/* No max-height and no scroller of its own: the sheet scrolls, and nesting
+   scrollers is what made these rows unreachable by touch. */
 .maplist { display: flex; flex-direction: column; gap: 8px;
-           max-height: 45vh; overflow: auto; margin: 4px 0 12px; }
+           margin: 4px 0 12px; }
 .maprow { text-align: left; padding: 12px 14px; line-height: 1.35; }
+/* The map picker's rows are buttons and take their surface from .btn; the
+   waypoint list's are plain divs and need their own. */
+div.maprow { background: var(--bg); border: 1px solid var(--line);
+             border-radius: 12px; color: var(--text); font-weight: 600; }
 .maprow small { display: block; color: var(--muted); font-weight: 400; }
-.rowline { display: flex; align-items: center; gap: 10px; margin: 10px 0;
-           font-size: 14px; line-height: 1.35; }
-.rowline input { width: 22px; height: 22px; }
+.rowline { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0;
+           font-size: 14px; line-height: 1.35; cursor: pointer; }
+/* flex: none or a long label shrinks the box; the top margin optically
+   centres it on the first line of a label that wraps to two. */
+.rowline input { flex: none; width: 22px; height: 22px; margin-top: 1px;
+                 accent-color: var(--accent); }
+.rowline span { flex: 1; min-width: 0; }
 
 /* ── joystick ───────────────────────────────────────────────────────── */
 .stick {
@@ -119,16 +129,28 @@ html, body {
 /* ── save sheet ─────────────────────────────────────────────────────── */
 .sheet {
   position: fixed; inset: 0; z-index: 5;
-  background: rgba(0,0,0,.6); display: flex; align-items: flex-end;
+  background: rgba(0,0,0,.6); display: flex; flex-direction: column;
+  /* The single scroll container. touch-action is `none` on body so a drag
+     on the map never scrolls the page, and it inherits — a scroller in
+     here has to opt back in or touch cannot move it at all. */
+  overflow-y: auto; touch-action: pan-y; overscroll-behavior: contain;
 }
 .sheet-inner {
   width: 100%; background: var(--panel);
   border-radius: 18px 18px 0 0; border-top: 1px solid var(--line);
   padding: 22px 18px calc(22px + env(safe-area-inset-bottom));
+  /* Bottom-anchored via auto margin rather than align-items: flex-end,
+     which clips the top of an item taller than the flex container instead
+     of letting it scroll into view — the route sheet is taller than a
+     phone once it holds a waypoint list, two options and five buttons. */
+  margin-top: auto;
 }
 .sheet h2 { margin: 0 0 6px; font-size: 18px; }
 .sheet p { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
-.sheet input {
+/* Text fields only. A bare `.sheet input` also matched the checkboxes in
+   .rowline — equal specificity, so it won on source order and blew them up
+   to 100% x 52px, squeezing their labels out of the row. */
+.sheet input[type="text"] {
   width: 100%; min-height: 52px; padding: 0 14px; margin-bottom: 14px;
   border-radius: 12px; border: 1px solid var(--line);
   background: var(--bg); color: var(--text); font: inherit;
