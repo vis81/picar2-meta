@@ -29,7 +29,13 @@ mod('action_msgs.msg', GoalStatus=types.SimpleNamespace(
     STATUS_SUCCEEDED=4, STATUS_CANCELED=5, STATUS_ABORTED=6))
 mod('action_msgs')
 class PoseStamped:
-    def __init__(self): self.header = Any(); self.pose = Any()
+    class _P:
+        def __init__(self): self.x = 0.0; self.y = 0.0; self.z = 0.0
+    class _Pose:
+        def __init__(self):
+            self.position = PoseStamped._P(); self.orientation = PoseStamped._P()
+            self.orientation.w = 1.0
+    def __init__(self): self.header = Any(); self.pose = PoseStamped._Pose()
 mod('geometry_msgs.msg', PoseStamped=PoseStamped, PoseWithCovarianceStamped=Msg, Twist=Msg)
 mod('geometry_msgs')
 mod('explore_lite_msgs.msg', ExploreStatus=types.SimpleNamespace(EXPLORATION_COMPLETE='c'))
@@ -54,6 +60,30 @@ class R(RobotLink):
         self.route_idx = 0; self.route_passed = 0; self.route_error = None
         self._route_poses = []; self.sent = []; self._pose = None
         self.nav_state = 'idle'
+        # flow mode
+        self.route_flow = False
+        self._route_seq = 0; self._route_handle = None
+        self._route_sent_idx = None; self._route_min_d = None
+        self._route_retries = 0
+        self.windows = []          # each send_window's poses, as indices
+        self.nav_goal = None
+        outer = self
+        class _Fut:
+            def add_done_callback(self, cb): pass
+        class _Client:
+            def send_goal_async(self, goal):
+                outer.windows.append([
+                    (round(p.pose.position.x, 3), round(p.pose.position.y, 3))
+                    for p in goal.poses])
+                return _Fut()
+        self._route_nav = _Client()
+    def get_clock(self):
+        class _C:
+            def now(self):
+                class _T:
+                    def to_msg(self): return None
+                return _T()
+        return _C()
     def pose(self): return self._pose
     def cancel_goal(self): self.nav_state = 'canceled'
     def send_goal(self, x, y, yaw):
@@ -146,6 +176,132 @@ r6.route_loop = False
 check("one-shot, far -> 0", r6._route_first_index(), 0)
 r6._pose = {'x': 0.05, 'y': 0.0, 'yaw': 0.0}
 check("one-shot, on wp0 -> 1", r6._route_first_index(), 1)
+
+# ── flow-through routes ──────────────────────────────────────────────────
+def flow(wps, loop):
+    r = R(wps)
+    r._route_poses = list(r.waypoints)
+    r.route_loop = loop; r.route_flow = True; r.route_active = True
+    r.route_idx = 0; r._route_send_window()
+    return r
+
+def at(r, x, y):
+    """Move the robot and let the flow tick see it."""
+    r._pose = {'x': x, 'y': y, 'yaw': 0.0}
+    r._route_flow_tick()
+
+print("  === a flow route sends a window, not one goal at a time ===")
+f = flow([(0,0),(1,0),(2,0),(3,0)], True)
+check("window of 3", f.windows, [[(0.0,0.0),(1.0,0.0),(2.0,0.0)]])
+check("nothing sent to the single-goal client", f.sent, [])
+
+print("  === a waypoint is counted at its closest approach ===")
+f = flow([(0,0),(1,0),(2,0),(3,0)], True)
+at(f, -0.30, 0.0)
+check("approaching, not yet passed", f.route_passed, 0)
+at(f, -0.02, 0.0)
+check("at it, still not passed", f.route_passed, 0)
+at(f, 0.15, 0.0)
+check("receding -> passed", f.route_passed, 1)
+check("advanced", f.route_idx, 1)
+
+print("  === a distant pass does not count ===")
+f = flow([(0,0),(1,0),(2,0),(3,0)], True)
+at(f, 0.0, 1.20); at(f, 0.5, 1.30)
+check("outside the capture radius", f.route_passed, 0)
+
+print("  === the window slides, but not on every waypoint ===")
+f = flow([(0,0),(1,0),(2,0),(3,0)], True)
+at(f, -0.05, 0); at(f, 0.15, 0)          # pass wp0
+check("one waypoint in, window unchanged", len(f.windows), 1)
+at(f, 0.95, 0); at(f, 1.15, 0)           # pass wp1
+check("two in, window slides", len(f.windows), 2)
+check("new window starts at wp2", f.windows[1], [(2.0,0.0),(3.0,0.0),(0.0,0.0)])
+
+print("  === a one-shot route leaves its last waypoint to the goal checker ===")
+f = flow([(0,0),(1,0),(2,0)], False)
+f.route_idx = 2; f._route_min_d = None
+at(f, 1.98, 0); at(f, 2.10, 0)
+check("pose does not retire the final waypoint", f.route_passed, 0)
+check("still active", f.route_active, True)
+
+class Res:
+    def __init__(self, st): self.st = st
+    def result(self): return types.SimpleNamespace(status=self.st)
+
+f._on_window_done(Res(4), f._route_seq)          # SUCCEEDED
+check("goal checker retires it", f.route_passed, 1)
+check("route complete", f.route_error, "route complete")
+check("inactive", f.route_active, False)
+
+print("  === a cancelled window ends the route without an error ===")
+f = flow([(0,0),(1,0),(2,0)], True)
+f._on_window_done(Res(5), f._route_seq)          # CANCELED
+check("inactive", f.route_active, False)
+check("no error", f.route_error, None)
+
+print("  === a transient abort is retried, not fatal ===")
+f = flow([(0,0),(1,0),(2,0)], True)
+f._pose = {'x': 4.0, 'y': 4.0, 'yaw': 0.0}
+f._on_window_done(Res(6), f._route_seq)          # ABORTED, far away
+check("route survives one abort", f.route_active, True)
+check("re-sent the window", len(f.windows), 2)
+check("no waypoint credited", f.route_passed, 0)
+
+print("  === but repeated aborts on the same waypoint fail the route ===")
+f = flow([(0,0),(1,0),(2,0)], True)
+f._pose = {'x': 4.0, 'y': 4.0, 'yaw': 0.0}
+for _ in range(3):
+    f._on_window_done(Res(6), f._route_seq)
+check("inactive", f.route_active, False)
+check("names the waypoint", f.route_error, "could not reach waypoint 1")
+
+print("  === progress refills the retry budget ===")
+f = flow([(0,0),(1,0),(2,0),(3,0)], True)
+f._pose = {'x': 9.0, 'y': 9.0, 'yaw': 0.0}
+f._on_window_done(Res(6), f._route_seq)
+f._on_window_done(Res(6), f._route_seq)
+check("two aborts, still going", f.route_active, True)
+at(f, -0.05, 0); at(f, 0.15, 0)                  # pass wp0
+check("passed one", f.route_passed, 1)
+f._pose = {'x': 9.0, 'y': 9.0, 'yaw': 0.0}
+f._on_window_done(Res(6), f._route_seq)
+f._on_window_done(Res(6), f._route_seq)
+check("budget refilled by the pass", f.route_active, True)
+
+print("  === an abort next to the waypoint presses on ===")
+f = flow([(0,0),(1,0),(2,0)], True)
+f._pose = {'x': 0.20, 'y': 0.0, 'yaw': 0.0}
+f._on_window_done(Res(6), f._route_seq)
+check("still running", f.route_active, True)
+check("counted it", f.route_passed, 1)
+
+print("  === a superseded window's abort is ignored ===")
+f = flow([(0,0),(1,0),(2,0)], True)
+stale = f._route_seq
+f._route_seq += 1
+f._pose = {'x': 9.0, 'y': 9.0, 'yaw': 0.0}
+f._on_window_done(Res(6), stale)
+check("route survives its own preemption", f.route_active, True)
+check("no error", f.route_error, None)
+
+print("  === stopping a flow route cancels the window ===")
+f = flow([(0,0),(1,0),(2,0)], True)
+f._route_handle = types.SimpleNamespace(cancel_goal_async=lambda: None)
+f.route_stop()
+check("inactive", f.route_active, False)
+check("handle released", f._route_handle, None)
+n = len(f.windows)
+at(f, 0.0, 0.0); at(f, 0.5, 0.0)
+check("tick does nothing after stop", f.route_passed, 0)
+check("no further windows", len(f.windows), n)
+
+print("  === stop-at-each still works, untouched ===")
+f = R([(0,0),(1,0),(2,0)])
+f._route_poses = list(f.waypoints); f.route_active = True; f.route_flow = False
+f._route_send_current(); f._route_on_goal_done('succeeded')
+check("advances on the action result", f.sent, [0, 1])
+
 
 print()
 print("  RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

@@ -27,7 +27,7 @@ let armed = null;          // null | 'pose' — a map tap is being awaited
 let drag = null;           // {a, p} in grid cells while placing
 let nav = { state: 'idle', goal: null, distance: null };
 let navReady = false;      // nav2 up and able to take a goal
-let route = { waypoints: [], active: false, loop: false, index: null,
+let route = { waypoints: [], active: false, loop: false, flow: false, index: null,
               passed: 0, error: null };
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
 
@@ -274,7 +274,8 @@ function setLive(ok) {
     const n = route.waypoints.length;
     const at = route.index == null ? '' : ` — heading for ${route.index + 1}/${n}`;
     $('state').textContent =
-      (route.loop ? 'looping route' : 'driving route') + at;
+      (route.loop ? 'looping route' : 'driving route')
+      + (route.flow ? ' (flowing)' : '') + at;
     return;
   }
   if (route.error) { $('state').textContent = route.error; return; }
@@ -492,7 +493,8 @@ $('wpadd').onclick = () => {
 $('routego').onclick = async () => {
   $('routeerr').textContent = '';
   const r = await (await post('/api/route/start',
-                              { loop: $('loop').checked })).json();
+                              { loop: $('loop').checked,
+                                flow: $('flow').checked })).json();
   if (r.ok) $('routesheet').classList.add('hidden');
   else $('routeerr').textContent = r.error || 'Could not start the route.';
 };
@@ -500,6 +502,7 @@ $('routego').onclick = async () => {
 function openRoute() {
   $('routeerr').textContent = '';
   $('loop').checked = route.loop;
+  $('flow').checked = route.flow;
   renderRoute();
   $('routesheet').classList.remove('hidden');
 }

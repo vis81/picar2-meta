@@ -39,7 +39,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from explore_lite_msgs.msg import ExploreStatus
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import SetInitialPose
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
@@ -112,13 +112,39 @@ class RobotLink(Node):
         self.nav_distance = None
 
         # ── routes ───────────────────────────────────────────────────────
+        # Two ways to drive a list of waypoints, and they differ in what
+        # decides a waypoint has been reached:
+        #
+        #   stop-at-each  one NavigateToPose per waypoint. Nav2's goal
+        #                 checker decides, so arrival is held to
+        #                 xy_goal_tolerance — at the cost of decelerating
+        #                 into every waypoint and accelerating out.
+        #   flow-through  a rolling NavigateThroughPoses window. The
+        #                 controller sees one continuous path, so it never
+        #                 slows for an intermediate waypoint.
+        #
+        # Flow-through was tried before and reverted, because it trusted
+        # the action's SUCCEEDED to mean "reached them": the BT trims goals
+        # inside RemovePassedGoals' radius, and a window trimmed empty
+        # reports success having visibly missed them — measured at 0.75 m.
+        # It is back because arrival is no longer the BT's call. The server
+        # watches the robot's own pose and counts a waypoint passed at its
+        # closest approach, so trimming can no longer fabricate progress.
+        self._route_nav = ActionClient(self, NavigateThroughPoses,
+                                       "navigate_through_poses")
         self.waypoints: list[dict] = []
         self.route_active = False
         self.route_loop = False
+        self.route_flow = False
         self.route_idx = 0
         self.route_passed = 0
         self.route_error = None
         self._route_poses: list[dict] = []
+        self._route_seq = 0
+        self._route_handle = None
+        self._route_retries = 0
+        self._route_sent_idx = None     # index the live window starts at
+        self._route_min_d = None        # closest approach so far, current wp
         self.create_subscription(
             ExploreStatus, "/explore/status", self._on_explore_status, 10)
         self.explore_status = None
@@ -459,21 +485,31 @@ class RobotLink(Node):
         if self.waypoints:
             self.waypoints.pop()
 
-    def route_start(self, loop: bool):
+    def route_start(self, loop: bool, flow: bool = False):
         """Begin driving the waypoints. Returns (ok, message)."""
         if len(self.waypoints) < 2:
             return False, "add at least two waypoints"
-        if not self._nav.wait_for_server(timeout_sec=2.0):
+        client = self._route_nav if flow else self._nav
+        if not client.wait_for_server(timeout_sec=2.0):
             return False, "navigation isn't ready yet"
 
         # Snapshot, so editing the list mid-route cannot corrupt the run.
-        self._route_poses = self._resolved_waypoints()
         self.route_loop = bool(loop)
+        self.route_flow = bool(flow)
+        self._route_poses = self._resolved_waypoints()
         self.route_passed = 0
         self.route_error = None
         self.route_idx = self._route_first_index()
         self.route_active = True
-        self._route_send_current()
+        self._route_min_d = None
+        self._route_sent_idx = None
+        self._route_retries = 0
+        # A route and a single goal both drive; never let them overlap.
+        self.cancel_goal()
+        if self.route_flow:
+            self._route_send_window()
+        else:
+            self._route_send_current()
         return True, ""
 
     def _resolved_waypoints(self) -> list[dict]:
@@ -543,9 +579,195 @@ class RobotLink(Node):
         if not ok:
             self._route_finish(err or "could not send the waypoint")
 
+    # ── flow-through routes ──────────────────────────────────────────────
+    # The window holds this many waypoints. Only its final pose is a goal
+    # the controller must stop on, so keeping the end two or more waypoints
+    # ahead is what stops the robot decelerating into the one it is
+    # currently passing.
+    ROUTE_WINDOW = 3
+    # Inside this, a waypoint counts as being passed...
+    CAPTURE_RADIUS_M = 0.45
+    # ...and it is confirmed once the robot is moving away from it again,
+    # which puts the count at the closest approach rather than at the edge
+    # of some radius. Must exceed the pose noise or a jittering estimate
+    # would tick waypoints off on the spot.
+    RECEDE_M = 0.08
+    # Consecutive aborts on the same waypoint before the route gives up.
+    ROUTE_ABORT_RETRIES = 2
+    # RemovePassedGoals in the through-poses BT must trim inside
+    # CAPTURE_RADIUS_M. If it trimmed later, the planner would stop routing
+    # through a waypoint the robot had not yet come close enough to count,
+    # and the route would stall on it forever.
+
+    def _route_window(self) -> list[dict]:
+        n = len(self._route_poses)
+        size = min(self.ROUTE_WINDOW, n)
+        if self.route_loop:
+            return [self._route_poses[(self.route_idx + i) % n]
+                    for i in range(size)]
+        return self._route_poses[self.route_idx:self.route_idx + size]
+
+    def _pose_stamped(self, wp: dict) -> PoseStamped:
+        p = PoseStamped()
+        p.header.frame_id = "map"
+        p.header.stamp = self.get_clock().now().to_msg()
+        p.pose.position.x = float(wp["x"])
+        p.pose.position.y = float(wp["y"])
+        p.pose.orientation.z = math.sin(float(wp["yaw"]) / 2.0)
+        p.pose.orientation.w = math.cos(float(wp["yaw"]) / 2.0)
+        return p
+
+    def _route_send_window(self):
+        if not self.route_active:
+            return
+        window = self._route_window()
+        if not window:
+            self._route_finish("route complete")
+            return
+        self._route_seq += 1
+        seq = self._route_seq
+        self._route_sent_idx = self.route_idx
+        self.nav_state = "active"
+        self.nav_goal = {"x": window[0]["x"], "y": window[0]["y"],
+                         "yaw": window[0]["yaw"]}
+        goal = NavigateThroughPoses.Goal(
+            poses=[self._pose_stamped(w) for w in window])
+        fut = self._route_nav.send_goal_async(goal)
+        fut.add_done_callback(lambda f: self._on_window_accepted(f, seq))
+
+    def _on_window_accepted(self, fut, seq):
+        if seq != self._route_seq or not self.route_active:
+            return                      # a newer window has taken over
+        try:
+            gh = fut.result()
+        except Exception:
+            self._route_finish("navigation refused the route")
+            return
+        if not gh.accepted:
+            self._route_finish("navigation refused the route")
+            return
+        self._route_handle = gh
+        gh.get_result_async().add_done_callback(
+            lambda f: self._on_window_done(f, seq))
+
+    def _on_window_done(self, fut, seq):
+        """A window ended. In flow mode this is not how waypoints are
+        counted — _route_flow_tick does that from the robot's pose — so the
+        only questions here are whether the route is over and whether Nav2
+        is telling us it cannot continue."""
+        if seq != self._route_seq:
+            return                      # superseded; its abort is our doing
+        if not self.route_active:
+            return
+        try:
+            status = fut.result().status
+        except Exception:
+            status = GoalStatus.STATUS_ABORTED
+
+        if status == GoalStatus.STATUS_CANCELED:
+            self._route_finish(None)
+            return
+
+        n = len(self._route_poses)
+        at_end = (not self.route_loop) and self.route_idx >= n - 1
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            if at_end:
+                # The last waypoint of a one-shot route is a real goal and
+                # the robot stopped on it, so the goal checker's verdict is
+                # the right one to take.
+                self.route_passed += 1
+                self.route_idx = n
+                self._route_finish("route complete")
+            else:
+                # The window ran out before the route did — the robot is
+                # parked on the window's end. Carry on from where we are.
+                self._route_send_window()
+            return
+
+        # Aborted. Close enough to the waypoint means press on, the same
+        # judgement the stop-at-each path makes.
+        wp = self._route_poses[self.route_idx % n]
+        p = self.pose()
+        near = (p is not None and
+                math.hypot(p["x"] - wp["x"], p["y"] - wp["y"])
+                < self.NEAR_ENOUGH_M)
+        if near:
+            self._route_retries = 0
+            self._route_pass_current()
+            return
+
+        # Far from it, so this is not an arrival — but not necessarily a
+        # dead end either. Nav2 aborts a goal for reasons that have nothing
+        # to do with whether the waypoint is reachable: a TF lookup landing
+        # a few ms in the future is enough, and on a loaded Pi that happens
+        # to a route that has been lapping cleanly for minutes. Ask again
+        # before giving up, and only call it unreachable when repeated
+        # attempts make no progress — _route_pass_current resets the count,
+        # so these are consecutive failures, not a lifetime budget.
+        if self._route_retries < self.ROUTE_ABORT_RETRIES:
+            self._route_retries += 1
+            self._route_send_window()
+            return
+        self._route_finish("could not reach waypoint "
+                           f"{self.route_idx % n + 1}")
+
+    def _route_flow_tick(self):
+        """Count the current waypoint passed at its closest approach.
+
+        Called from the drive timer. Deliberately independent of the action
+        result: the BT's idea of a passed goal is a radius, and trusting it
+        is what made this approach report success while metres away.
+        """
+        if not self.route_active or not self.route_flow:
+            return
+        n = len(self._route_poses)
+        if n == 0:
+            return
+        # The final waypoint of a one-shot route is a genuine stop, so let
+        # the goal checker have it rather than calling it passed in transit.
+        if (not self.route_loop) and self.route_idx >= n - 1:
+            return
+        p = self.pose()
+        if p is None:
+            return
+        wp = self._route_poses[self.route_idx % n]
+        d = math.hypot(p["x"] - wp["x"], p["y"] - wp["y"])
+        if self._route_min_d is None or d < self._route_min_d:
+            self._route_min_d = d
+        if (self._route_min_d < self.CAPTURE_RADIUS_M
+                and d > self._route_min_d + self.RECEDE_M):
+            self._route_pass_current()
+
+    def _route_pass_current(self):
+        """Advance past the current waypoint, re-sending the window when it
+        has been consumed far enough to be worth it. Each send preempts the
+        running goal, so sending on every waypoint would reintroduce a stop
+        at each — the thing this mode exists to avoid."""
+        self.route_passed += 1
+        self._route_min_d = None
+        self._route_retries = 0
+        n = len(self._route_poses)
+        if self.route_loop:
+            self.route_idx = (self.route_idx + 1) % n
+        else:
+            self.route_idx += 1
+            if self.route_idx >= n:
+                self._route_finish("route complete")
+                return
+
+        consumed = 0
+        if self._route_sent_idx is not None:
+            consumed = (self.route_idx - self._route_sent_idx) % n \
+                if self.route_loop else self.route_idx - self._route_sent_idx
+        if self._route_sent_idx is None or consumed >= self.ROUTE_WINDOW - 1:
+            self._route_send_window()
+
     def _route_on_goal_done(self, state: str):
         """Called from the goal result once a waypoint's goal has ended."""
-        if not self.route_active:
+        if not self.route_active or self.route_flow:
+            # A flow route is driven by the through-poses client and
+            # advanced from the pose; a NavigateToPose result reaching here
+            # is the leftover single goal that route_start cancelled.
             return
         if state == "canceled":
             self._route_finish(None)
@@ -575,21 +797,43 @@ class RobotLink(Node):
         self._route_send_current()
 
     def _route_finish(self, error):
+        was_flow = self.route_flow
         self.route_active = False
         self.route_error = error
+        if was_flow and self._route_handle is not None:
+            # "route complete" included: the window may still hold poses
+            # beyond the last one the route cared about.
+            self._cancel_window()
 
     def route_stop(self):
         """Idempotent."""
         if not self.route_active:
             return
         self.route_active = False
+        self._cancel_window()
         self.cancel_goal()
+
+    def _cancel_window(self):
+        """Cancel a through-poses window, if one is running. Bumping the
+        sequence first means the resulting abort is ignored rather than
+        read as a navigation failure."""
+        gh, self._route_handle = self._route_handle, None
+        self._route_seq += 1
+        self._route_sent_idx = None
+        if gh is None:
+            return
+        try:
+            gh.cancel_goal_async()
+        except Exception:
+            pass
+        self.nav_state = "canceling"
 
     def route_status(self) -> dict:
         return {
             "waypoints": self.waypoints,
             "active": self.route_active,
             "loop": self.route_loop,
+            "flow": self.route_flow,
             "index": self.route_idx if self.route_active else None,
             "passed": self.route_passed,
             "error": self.route_error,
@@ -620,6 +864,14 @@ class RobotLink(Node):
             # controller's reference_timeout hold the stop.
             self._cmd_pub.publish(Twist())
             self._drive_was_active = False
+
+        # A flow route advances on the robot's position rather than on an
+        # action result, so it needs a clock. This is the only timer.
+        if self.route_active and self.route_flow:
+            try:
+                self._route_flow_tick()
+            except Exception:               # never kill the drive timer
+                pass
 
 
 def clamp(v, lo, hi):
@@ -1472,7 +1724,9 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         # route exactly as it fights a single one.
         if modes.running("explore"):
             modes.stop_explore()
-        ok, err = link.route_start(bool(body().get("loop", False)))
+        b = body()
+        ok, err = link.route_start(bool(b.get("loop", False)),
+                                   bool(b.get("flow", False)))
         if not ok:
             return jsonify({"ok": False, "error": err}), 409
         return jsonify({"ok": True}), 202
