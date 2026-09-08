@@ -154,7 +154,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
@@ -337,6 +337,22 @@ bench-explore:
 	  echo \"--- $(SCENARIO) [$(EXPLORER)] run \$$i/$(RUNS)\" && \
 	  ros2 run picar2_benchmark bench-explore $(_SCENARIO_YML) \
 	    --explorer $(EXPLORER) --sensor-noise $(NOISE) -o $(BENCH_OUT); done"
+
+# One measured waypoint-route trial. Neither a goal nor an exploration: the
+# robot drives a list of waypoints and the question is whether it actually
+# passed close to every one, in order — which Nav2's own result cannot answer,
+# since it reports SUCCEEDED on a route it drove badly.
+# ROUTE_MODE selects how the list is driven:
+#   flow  rolling NavigateThroughPoses window, never stopping on a waypoint
+#   stop  one NavigateToPose per waypoint, Nav2's goal checker deciding arrival
+#   make bench-route SCENARIO=route_square ROUTE_MODE=flow RUNS=3
+ROUTE_MODE ?= flow
+bench-route:
+	$(CMD) "$(BENCH_SETUP) && for i in \$$(seq 1 $(RUNS)); do \
+	  echo \"--- $(SCENARIO) [route/$(ROUTE_MODE)] run \$$i/$(RUNS)\" && \
+	  ros2 run picar2_benchmark bench-route $(_SCENARIO_YML) \
+	    --route-mode $(ROUTE_MODE) --sensor-noise $(NOISE) \
+	    -o $(BENCH_OUT); done"
 
 # Leave the stack up afterwards so RViz/Gazebo can be attached.
 bench-keep:
