@@ -7,3 +7,7 @@ bags/
 src/
 __pycache__/
 *.pyc
+# rosbag captures — same as bags/, just written somewhere else
+*_debug*/
+# per-machine ROS env (PC_IFACE, PI_IP); sync2pi deliberately skips it
+setenv.sh
