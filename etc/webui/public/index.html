@@ -16,6 +16,7 @@
   <span id="state">connecting…</span>
   <span class="spacer"></span>
   <span id="chips"></span>
+  <button id="settings" class="iconbtn" aria-label="Settings">⚙</button>
 </header>
 
 <canvas id="map"></canvas>
@@ -76,6 +77,25 @@
       <button id="cancel-route" class="btn">Close</button>
     </div>
     <div id="routeerr" class="err"></div>
+  </div>
+</div>
+
+<div id="settingssheet" class="sheet hidden">
+  <div class="sheet-inner">
+    <h2>Settings</h2>
+    <p>Top speed applies to every autonomous drive — goals, routes and
+      exploring — and to the joystick.</p>
+    <div class="rowline speedrow">
+      <span>Top speed</span>
+      <button id="speeddown" class="step" aria-label="slower">−</button>
+      <b id="speedval">—</b>
+      <button id="speedup" class="step" aria-label="faster">+</button>
+    </div>
+    <p id="speednote" class="note"></p>
+    <div class="sheet-buttons">
+      <button id="cancel-settings" class="btn">Close</button>
+    </div>
+    <div id="settingserr" class="err"></div>
   </div>
 </div>
 

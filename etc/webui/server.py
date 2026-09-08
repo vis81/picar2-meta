@@ -41,6 +41,8 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from explore_lite_msgs.msg import ExploreStatus
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import SetInitialPose
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
 from rclpy.action import ActionClient
@@ -55,10 +57,20 @@ from waitress import serve
 DRIVE_TIMEOUT_S = 0.4
 DRIVE_RATE_HZ = 20.0
 
-# Speed caps for the touch joystick — well under the hardware limits, since
-# this is for nudging during mapping, not driving fast.
-MAX_LINEAR = 0.25
-MAX_ANGULAR = 0.8
+# The touch joystick drives at whatever top speed navigation is set to, so
+# one setting governs both. This is only the fallback for when navigation
+# is not running and there is nothing to read a speed from — chiefly the
+# window in localize mode between entering it and setting the initial pose.
+# It matches desired_linear_vel in nav2.yaml, so crossing that boundary
+# does not change how the robot drives.
+MAX_LINEAR = 0.40
+# Ackermann steering ties the two together: w = v / r. Deriving the angular
+# cap from the linear one keeps the tightest reachable turn constant as the
+# speed changes, instead of the robot steering ever more widely as it speeds
+# up. 0.34 m is the mechanical minimum radius; cmd_vel_relay clamps angular
+# at 1.2 rad/s regardless, so asking for more than that achieves nothing.
+MIN_TURN_RADIUS_M = 0.34
+RELAY_MAX_ANGULAR = 1.2
 
 
 class RobotLink(Node):
@@ -100,6 +112,16 @@ class RobotLink(Node):
         # callback-driven, so the existing spin thread carries it and
         # _drive_tick stays the only timer.
         self._nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        # The controller's top speed, read and written live. RPP handles this
+        # one in its dynamic-parameter callback, so a set takes effect on the
+        # next control cycle without restarting anything. It is not written
+        # back to nav2.yaml and does not survive a Nav2 restart — which the
+        # mode switch does — so it is read fresh whenever Nav2 reappears.
+        self._speed_get = self.create_client(
+            GetParameters, "/controller_server/get_parameters")
+        self._speed_set = self.create_client(
+            SetParameters, "/controller_server/set_parameters")
+        self.max_speed = None
         self._goal_handle = None
         # Each goal carries a sequence number so late callbacks from a
         # superseded one cannot clobber the current goal's state, and a
@@ -332,6 +354,64 @@ class RobotLink(Node):
             time.sleep(0.1)
         return False, "AMCL took the pose but published no transform"
 
+    # ── speed ────────────────────────────────────────────────────────────
+    SPEED_PARAM = "FollowPath.desired_linear_vel"
+    # Above roughly this, cmd_vel_relay's max_angular_vel (1.2 rad/s) starts
+    # clipping the turn rate a Reeds-Shepp path asks for on the planner's
+    # 0.5 m minimum radius, and the robot under-steers off its own plan.
+    SPEED_MAX = 0.6
+    SPEED_MIN = 0.1
+
+    def _call(self, client, req, timeout=3.0):
+        """One request against a parameter service. Never spins — the node
+        has its own spin thread, and spinning here would run callbacks on
+        two threads at once."""
+        if not client.wait_for_service(timeout_sec=1.5):
+            return None
+        done = threading.Event()
+        fut = client.call_async(req)
+        fut.add_done_callback(lambda _f: done.set())
+        if not done.wait(timeout=timeout):
+            return None
+        try:
+            return fut.result()
+        except Exception:
+            return None
+
+    def refresh_max_speed(self):
+        """Read the controller's current top speed. Returns it, or None."""
+        res = self._call(self._speed_get,
+                         GetParameters.Request(names=[self.SPEED_PARAM]))
+        if res is None or not res.values:
+            return None
+        v = res.values[0]
+        if v.type != ParameterType.PARAMETER_DOUBLE:
+            return None                 # unset params come back as NOT_SET
+        self.max_speed = round(float(v.double_value), 3)
+        return self.max_speed
+
+    def set_max_speed(self, value: float):
+        """Change it. Returns (ok, message)."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return False, "not a number"
+        if not (self.SPEED_MIN <= v <= self.SPEED_MAX):
+            return False, (f"pick a speed between {self.SPEED_MIN:.2f} and "
+                           f"{self.SPEED_MAX:.2f} m/s")
+        req = SetParameters.Request(parameters=[Parameter(
+            name=self.SPEED_PARAM,
+            value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                 double_value=v))])
+        res = self._call(self._speed_set, req)
+        if res is None:
+            return False, "navigation isn't running"
+        if not res.results or not res.results[0].successful:
+            reason = (res.results[0].reason if res.results else "") or "refused"
+            return False, reason
+        self.max_speed = round(v, 3)
+        return True, ""
+
     # ── navigation goals ─────────────────────────────────────────────────
     def send_goal(self, x: float, y: float, yaw: float):
         """Ask Nav2 to drive somewhere. Returns (ok, message)."""
@@ -441,6 +521,7 @@ class RobotLink(Node):
                 "distance": self.nav_distance}
 
     def forget_nav(self):
+        self.max_speed = None
         self.route_stop()
         self.cancel_goal()
         self._goal_seq += 1             # orphan any callback still in flight
@@ -840,11 +921,17 @@ class RobotLink(Node):
         }
 
     # ── drive ────────────────────────────────────────────────────────────
+    def drive_limits(self) -> tuple[float, float]:
+        """What the joystick is allowed to command right now."""
+        lin = self.max_speed if self.max_speed is not None else MAX_LINEAR
+        return lin, min(RELAY_MAX_ANGULAR, lin / MIN_TURN_RADIUS_M)
+
     def set_drive(self, linear: float, angular: float):
+        max_lin, max_ang = self.drive_limits()
         with self._lock:
             self._drive = (
-                clamp(linear, -MAX_LINEAR, MAX_LINEAR),
-                clamp(angular, -MAX_ANGULAR, MAX_ANGULAR),
+                clamp(linear, -max_lin, max_lin),
+                clamp(angular, -max_ang, max_ang),
             )
             self._drive_stamp = time.monotonic()
 
@@ -1537,6 +1624,14 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             except OSError:
                 pass
 
+    speed_probe = threading.Event()
+
+    def _probe_speed():
+        try:
+            link.refresh_max_speed()
+        finally:
+            speed_probe.clear()
+
     def body() -> dict:
         """request.json is whatever was sent — a bare string or list would
         make .get() raise and turn a bad request into a 500."""
@@ -1558,6 +1653,13 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     def status():
         grid, seq = link.map_snapshot()
         pose = link.pose()
+        if link.max_speed is None and modes.running("nav2"):
+            # Off the request thread: the parameter service is far too slow
+            # to sit inside a poll that runs twice a second. One flight at a
+            # time, and forget_nav() clears the cache when Nav2 goes away.
+            if not speed_probe.is_set():
+                speed_probe.set()
+                threading.Thread(target=_probe_speed, daemon=True).start()
         return jsonify({
             "mode": modes.mode,
             "map_name": modes.map_name,
@@ -1572,6 +1674,9 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "nav": link.nav_status(),
             "nav_ready": modes.nav_ready(link),
             "route": link.route_status(),
+            "max_speed": link.max_speed,
+            "drive_limits": list(link.drive_limits()),
+            "speed_range": [link.SPEED_MIN, link.SPEED_MAX],
             "maps": list_maps(ws),
         })
 
@@ -1730,6 +1835,20 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         if not ok:
             return jsonify({"ok": False, "error": err}), 409
         return jsonify({"ok": True}), 202
+
+    @app.route("/api/speed", methods=["POST"])
+    def set_speed():
+        if not modes.running("nav2"):
+            return jsonify({"ok": False,
+                            "error": "navigation isn't running"}), 409
+        try:
+            value = body()["value"]
+        except (KeyError, TypeError):
+            return jsonify({"ok": False, "error": "need a value"}), 400
+        ok, err = link.set_max_speed(value)
+        if not ok:
+            return jsonify({"ok": False, "error": err}), 409
+        return jsonify({"ok": True, "max_speed": link.max_speed})
 
     @app.route("/api/route/stop", methods=["POST"])
     def route_stop():

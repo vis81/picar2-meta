@@ -34,6 +34,13 @@ html, body {
 .dot.dead { background: var(--danger); }
 
 #chips { display: flex; gap: 5px; }
+.iconbtn {
+  flex: none; width: 32px; height: 32px; margin-left: 6px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--muted);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.iconbtn:active { transform: scale(.94); }
 .chip {
   padding: 2px 8px; border-radius: 20px; font-size: 11px;
   background: var(--panel); border: 1px solid var(--line); color: var(--muted);
@@ -112,6 +119,18 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 .rowline input { flex: none; width: 22px; height: 22px; margin-top: 1px;
                  accent-color: var(--accent); }
 .rowline span { flex: 1; min-width: 0; }
+/* Applies to every autonomous drive, not just routes, so it reads as a
+   setting rather than a route option — hence the value, not a checkbox. */
+.speedrow { align-items: center; gap: 12px; }
+.speedrow b { min-width: 5.5ch; text-align: center;
+              font-variant-numeric: tabular-nums; font-size: 16px; }
+.step {
+  flex: none; width: 44px; height: 44px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  font: inherit; font-size: 22px; line-height: 1; cursor: pointer;
+}
+.step:active { transform: scale(.94); }
+.step:disabled { opacity: .45; }
 
 /* ── joystick ───────────────────────────────────────────────────────── */
 .stick {
@@ -157,3 +176,6 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 }
 .sheet-buttons { display: flex; gap: 10px; }
 .err { color: var(--danger); font-size: 13px; margin-top: 12px; min-height: 18px; }
+/* .sheet p is the heading's subtitle and carries a 16px bottom margin;
+   this one trails a control and should sit close to it. */
+.note { margin: 6px 0 0 !important; color: var(--muted); font-size: 12px; }

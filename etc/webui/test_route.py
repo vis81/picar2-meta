@@ -42,6 +42,10 @@ mod('explore_lite_msgs.msg', ExploreStatus=types.SimpleNamespace(EXPLORATION_COM
 mod('explore_lite_msgs')
 mod('nav2_msgs.action', NavigateToPose=Any, NavigateThroughPoses=types.SimpleNamespace(Goal=Msg))
 mod('nav2_msgs.srv', SetInitialPose=Any)
+mod('rcl_interfaces.msg', Parameter=Any, ParameterValue=Any,
+    ParameterType=types.SimpleNamespace(PARAMETER_DOUBLE=3))
+mod('rcl_interfaces.srv', GetParameters=Any, SetParameters=Any)
+mod('rcl_interfaces')
 mod('nav2_msgs')
 mod('nav_msgs.msg', OccupancyGrid=Any); mod('nav_msgs')
 mod('std_msgs.msg', Bool=Any); mod('std_msgs')

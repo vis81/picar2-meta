@@ -8,8 +8,11 @@ const $ = (id) => document.getElementById(id);
 const canvas = $('map');
 const ctx = canvas.getContext('2d');
 
-const MAX_LINEAR = 0.25;   // must match server.py
-const MAX_ANGULAR = 0.8;
+// The joystick's full deflection, reported by the server so it tracks the
+// top speed set in Settings. These are only the values used before the
+// first status arrives; the server clamps regardless, so they cannot
+// command more than it allows.
+let driveLimits = [0.40, 1.18];
 
 let mapData = null;        // {w, h, res, ox, oy, img}
 let mapSeq = -1;
@@ -27,6 +30,8 @@ let armed = null;          // null | 'pose' — a map tap is being awaited
 let drag = null;           // {a, p} in grid cells while placing
 let nav = { state: 'idle', goal: null, distance: null };
 let navReady = false;      // nav2 up and able to take a goal
+let maxSpeed = null;       // controller's top speed, null until nav2 reports
+let speedRange = [0.1, 0.6];
 let route = { waypoints: [], active: false, loop: false, flow: false, index: null,
               passed: 0, error: null };
 let view = { scale: 1, tx: 0, ty: 0, fitted: false };
@@ -255,6 +260,12 @@ async function poll() {
     maps = s.maps || [];
     nav = s.nav || { state: 'idle', goal: null, distance: null };
     navReady = !!s.nav_ready;
+    // Not while a step is in flight, or the poll would snap the display
+    // back to the old value between the tap and the server's reply.
+    if (!speedBusy) maxSpeed = s.max_speed;
+    if (s.speed_range) speedRange = s.speed_range;
+    if (s.drive_limits) driveLimits = s.drive_limits;
+    renderSpeed();
     route = s.route || route;
     reportFailures();
     setLive(true);
@@ -507,6 +518,53 @@ function openRoute() {
   $('routesheet').classList.remove('hidden');
 }
 
+const SPEED_STEP = 0.05;
+let speedBusy = false;
+
+function renderSpeed() {
+  const v = $('speedval');
+  if (!v) return;
+  v.textContent = maxSpeed == null ? '—' : maxSpeed.toFixed(2) + ' m/s';
+  const [lo, hi] = speedRange;
+  $('speeddown').disabled = speedBusy || maxSpeed == null || maxSpeed <= lo + 1e-6;
+  $('speedup').disabled   = speedBusy || maxSpeed == null || maxSpeed >= hi - 1e-6;
+  $('speednote').textContent = maxSpeed == null
+    ? `Available once navigation is running. The joystick is limited to ` +
+      `${driveLimits[0].toFixed(2)} m/s until then.`
+    : `${lo.toFixed(2)}–${hi.toFixed(2)} m/s, and the joystick matches it. ` +
+      'Not saved — returns to the configured speed when navigation restarts.';
+}
+
+async function stepSpeed(delta) {
+  if (maxSpeed == null || speedBusy) return;
+  const [lo, hi] = speedRange;
+  const want = Math.min(hi, Math.max(lo, Math.round((maxSpeed + delta) * 100) / 100));
+  if (want === maxSpeed) return;
+  speedBusy = true;
+  maxSpeed = want;                 // optimistic, so the tap feels immediate
+  renderSpeed();
+  try {
+    const r = await (await post('/api/speed', { value: want })).json();
+    if (r.ok) maxSpeed = r.max_speed;
+    else $('settingserr').textContent = r.error || 'could not change the speed';
+  } catch (e) {
+    $('settingserr').textContent = 'could not change the speed';
+  } finally {
+    speedBusy = false;
+    renderSpeed();
+  }
+}
+
+$('settings').onclick = () => {
+  $('settingserr').textContent = '';
+  renderSpeed();
+  $('settingssheet').classList.remove('hidden');
+};
+$('cancel-settings').onclick = () => $('settingssheet').classList.add('hidden');
+
+$('speeddown').onclick = () => stepSpeed(-SPEED_STEP);
+$('speedup').onclick   = () => stepSpeed(+SPEED_STEP);
+
 function renderRoute() {
   const l = $('wplist');
   const wp = route.waypoints || [];
@@ -607,8 +665,8 @@ function stickMove(t) {
   if (d > max) { dx *= max / d; dy *= max / d; }
   knob.style.transform = `translate(${dx}px, ${dy}px)`;
   cmd = {
-    linear: (-dy / max) * MAX_LINEAR,
-    angular: (-dx / max) * MAX_ANGULAR,
+    linear: (-dy / max) * driveLimits[0],
+    angular: (-dx / max) * driveLimits[1],
   };
 }
 
