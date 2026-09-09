@@ -11,3 +11,9 @@ __pycache__/
 *_debug*/
 # per-machine ROS env (PC_IFACE, PI_IP); sync2pi deliberately skips it
 setenv.sh
+
+# Web UI layer logs (nav2/amcl/cartographer/explore). Under the workspace
+# rather than /tmp because the services run `docker run --rm` and only the
+# workspace is bind-mounted, so this is the one place a log survives the
+# container that wrote it.
+logs/

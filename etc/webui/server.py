@@ -973,7 +973,13 @@ class ModeStack:
     # cartographer and amcl are peers — both publish /map and broadcast
     # map→odom, so they must never run at the same time.
     LAYERS = ("cartographer", "amcl", "nav2", "explore")
-    LOG_DIR = "/tmp/picar-webui"
+    # Under the workspace, not /tmp. The service runs `docker run --rm`, and
+    # /tmp is inside the container, so a layer log written there dies with the
+    # container — which is exactly when it is wanted. Only /dev and the
+    # workspace are bind-mounted, so the workspace is the one place a log
+    # outlives the run that produced it. Falls back to /tmp off the robot,
+    # where PICAR_WS is not set.
+    LOG_DIR = os.path.join(os.environ.get("PICAR_WS", "/tmp"), "logs", "webui")
 
     def __init__(self):
         self._procs: dict[str, subprocess.Popen] = {}
@@ -1013,6 +1019,19 @@ class ModeStack:
     def log_path(self, name: str) -> str:
         return os.path.join(self.LOG_DIR, f"{name}.log")
 
+    def _rotate(self, path: str):
+        """Keep the previous run's log as .prev.
+
+        A layer is relaunched on every mode switch, so overwriting in place
+        means the log of the run you want to look at is destroyed by whatever
+        you did next — usually restarting to see what went wrong.
+        """
+        try:
+            if os.path.exists(path):
+                os.replace(path, path + ".prev")
+        except OSError:
+            pass
+
     def _launch(self, name: str, launch_file: str,
                 args: dict[str, str] | None = None):
         # Output goes to a file, never DEVNULL: a launch that dies on startup
@@ -1024,6 +1043,7 @@ class ModeStack:
             self._stop(name)
         cmd = ["ros2", "launch", "picar2_bringup", launch_file]
         cmd += [f"{k}:={v}" for k, v in (args or {}).items()]
+        self._rotate(self.log_path(name))
         log = open(self.log_path(name), "wb")
         log.write(f"$ {' '.join(cmd)}\n".encode())
         log.flush()
