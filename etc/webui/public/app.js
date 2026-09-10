@@ -27,6 +27,10 @@ let localized = false;
 let maps = [];             // saved maps, for the picker
 let lastSaved = null;      // preselect what you just saved when localizing
 let armed = null;          // null | 'pose' — a map tap is being awaited
+// The same UI serves a phone and a desktop browser, and "tap" is wrong on
+// one of them. Decided once from the pointer, not from the user agent.
+const HAS_MOUSE = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+const TAP = HAS_MOUSE ? 'Click' : 'Tap';
 let drag = null;           // {a, p} in grid cells while placing
 let nav = { state: 'idle', goal: null, distance: null };
 let navReady = false;      // nav2 up and able to take a goal
@@ -470,15 +474,18 @@ $('stopexplore').onclick = () => post('/api/explore', { on: false });
 
 function arm(what) {
   armed = what;
+  // Mouse users get no equivalent of "the button is highlighted, now tap the
+  // map" unless the cursor says so.
+  canvas.style.cursor = what ? 'crosshair' : 'grab';
   const hint = $('hint');
   hint.dataset.showing = '';
   if (armed) {
     hint.classList.remove('hidden');
     hint.textContent = armed === 'goal'
-      ? 'Tap where to go — drag to set the direction to arrive facing.'
+      ? `${TAP} where to go — drag to set the direction to arrive facing.`
       : armed === 'waypoint'
-      ? 'Tap to drop a waypoint — drag to set the heading to arrive on.'
-      : 'Tap where the robot is — drag to point the way it faces.';
+      ? `${TAP} to drop a waypoint — drag to set the heading to arrive on.`
+      : `${TAP} where the robot is — drag to point the way it faces.`;
   } else {
     hint.classList.add('hidden');
   }
@@ -566,6 +573,10 @@ $('speeddown').onclick = () => stepSpeed(-SPEED_STEP);
 $('speedup').onclick   = () => stepSpeed(+SPEED_STEP);
 
 function renderRoute() {
+  // Same reason as the arm() hints: this sheet is read on both devices.
+  const rp = document.querySelector('#routesheet p');
+  if (rp) rp.textContent =
+    `${TAP} the map to drop a waypoint, dragging to set the heading to arrive on.`;
   const l = $('wplist');
   const wp = route.waypoints || [];
   l.innerHTML = wp.length
@@ -755,6 +766,97 @@ canvas.addEventListener('touchend', () => {
   if (drag) { commitDrag(); drag = null; armed = null; renderControls(); }
   pan = null; pinch = null;
 });
+
+// ── mouse ─────────────────────────────────────────────────────────────
+// The phone is the primary device and its touch handlers are left exactly
+// as they were; these reuse the same functions rather than replacing them,
+// because stickMove() and toGrid() only ever wanted clientX/clientY and a
+// MouseEvent has both.
+
+// Left button only. Right and middle keep their usual meaning, and a
+// context menu mid-drag would otherwise strand the robot driving.
+const LEFT = 0;
+
+// Drive: press on the stick, drag, release.
+stick.addEventListener('mousedown', (e) => {
+  if (e.button !== LEFT) return;
+  e.preventDefault();
+  stickMove(e);
+  // Same unconditional yield as touchstart: the server decides what to stop.
+  post('/api/takeover');
+  armed = null; drag = null;
+  mouseDriving = true;
+  clearInterval(driveTimer);
+  driveTimer = setInterval(() => post('/api/drive', cmd), 100);
+});
+
+let mouseDriving = false;
+
+// Move and release are bound to the window, not the stick. Releasing the
+// button outside a 132 px circle is easy to do, and on the stick alone that
+// would leave the robot driving with no knob under the cursor — the one
+// failure here that actually moves the robot.
+window.addEventListener('mousemove', (e) => {
+  if (mouseDriving) { stickMove(e); return; }
+  if (mousePan) {
+    const dpr = canvas.width / window.innerWidth;
+    view.tx += (e.clientX - mousePan.x) * dpr;
+    view.ty += (e.clientY - mousePan.y) * dpr;
+    mousePan = { x: e.clientX, y: e.clientY };
+  } else if (drag && mouseArmed) {
+    drag.p = toGrid(e);
+  }
+});
+
+function endMouse() {
+  if (mouseDriving) { mouseDriving = false; stickEnd(); }
+  if (drag && mouseArmed) { commitDrag(); drag = null; armed = null; renderControls(); }
+  mouseArmed = false;
+  mousePan = null;
+  canvas.style.cursor = armed ? 'crosshair' : 'grab';
+}
+window.addEventListener('mouseup', (e) => { if (e.button === LEFT) endMouse(); });
+// Leaving the window with the button down never delivers a mouseup, so the
+// robot would keep the last command until the 0.4 s drive timeout. Stop on
+// the way out instead.
+window.addEventListener('blur', endMouse);
+document.addEventListener('mouseleave', endMouse);
+
+// Map: left-drag to pan, or to place a pose/goal/waypoint while armed.
+let mousePan = null, mouseArmed = false;
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button !== LEFT) return;
+  e.preventDefault();
+  if (armed && mapData) {
+    const g = toGrid(e);
+    drag = { a: g, p: g };
+    mouseArmed = true; mousePan = null;
+    return;
+  }
+  mousePan = { x: e.clientX, y: e.clientY };
+  canvas.style.cursor = 'grabbing';
+});
+
+// Wheel to zoom, about the cursor rather than the centre: zooming toward a
+// corner of a 20 m map is otherwise a pan-and-zoom chore. Same 0.5-40 clamp
+// as pinch, so both gestures reach the same limits.
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const dpr = canvas.width / window.innerWidth;
+  const before = view.scale;
+  // deltaMode 1 is lines rather than pixels, which trackpads and some mice
+  // report; without the scale a single notch would jump the whole range.
+  const step = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  const next = Math.max(0.5, Math.min(40, before * Math.exp(-step * 0.0015)));
+  if (next === before) return;
+  // Hold the point under the cursor still: solve tx so that the grid
+  // coordinate there is unchanged at the new scale.
+  const px = e.clientX * dpr, py = e.clientY * dpr;
+  view.tx = px - (px - view.tx) * (next / before);
+  view.ty = py - (py - view.ty) * (next / before);
+  view.scale = next;
+}, { passive: false });
 
 // True when the drag was too short to mean a direction.
 function dragIsTap() {

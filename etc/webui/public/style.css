@@ -48,7 +48,14 @@ html, body {
 .chip.on { color: var(--bg); background: var(--ok); border-color: var(--ok); font-weight: 600; }
 
 /* ── map ────────────────────────────────────────────────────────────── */
-#map { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#map { position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+       cursor: grab; }
+/* Pointer devices only: on a phone these do nothing, and a stray :hover
+   state left behind by a tap would be worse than no affordance at all. */
+@media (hover: hover) and (pointer: fine) {
+  .stick { cursor: grab; }
+  .stick:active { cursor: grabbing; }
+}
 
 .hint {
   position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
