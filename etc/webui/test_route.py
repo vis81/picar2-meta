@@ -106,6 +106,17 @@ def check(label, got, want):
 def arrive(r):   # the current waypoint's goal succeeded
     r._route_on_goal_done('succeeded')
 
+print("  === imports do not shadow each other ===")
+# rcl_interfaces.msg.Parameter (the message, used for SetParameters) and
+# rclpy.parameter.Parameter (the client class, used for use_sim_time) have the
+# same name. An unaliased second import silently replaced the first and broke
+# set_max_speed with a TypeError from inside rclpy — caught only on the robot.
+_src = open('etc/webui/server.py').read()
+check("rclpy Parameter is aliased",
+      "from rclpy.parameter import Parameter as RclpyParameter" in _src, True)
+check("message Parameter not shadowed",
+      _src.count("\nfrom rclpy.parameter import Parameter\n"), 0)
+
 print("  === one-shot route visits every waypoint, in order ===")
 r = R([(0,0),(1,0),(2,0)])
 r._route_poses = list(r.waypoints); r.route_loop = False

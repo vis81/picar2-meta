@@ -49,7 +49,10 @@ from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.parameter import Parameter
+# Aliased: rcl_interfaces.msg.Parameter is already imported above for the
+# SetParameters service, and an unaliased import here shadows it — which
+# broke set_max_speed with a TypeError from deep inside rclpy.
+from rclpy.parameter import Parameter as RclpyParameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
@@ -90,7 +93,7 @@ class RobotLink(Node):
         super().__init__(
             "picar_webui",
             parameter_overrides=[
-                Parameter("use_sim_time", Parameter.Type.BOOL, True)
+                RclpyParameter("use_sim_time", RclpyParameter.Type.BOOL, True)
             ] if sim else [])
 
         map_qos = QoSProfile(
