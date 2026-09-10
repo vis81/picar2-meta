@@ -19,6 +19,8 @@ class Msg:
 
 mod('rclpy', init=Any(), shutdown=Any(), spin=Any(), create_node=Any())
 mod('rclpy.node', Node=object)
+mod('rclpy.parameter', Parameter=types.SimpleNamespace(
+    Type=types.SimpleNamespace(BOOL='bool')))
 mod('rclpy.qos', QoSProfile=Any, DurabilityPolicy=Any(), ReliabilityPolicy=Any())
 mod('rclpy.time', Time=Any)
 mod('rclpy.action', ActionClient=Any)
