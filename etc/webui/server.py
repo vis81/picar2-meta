@@ -1219,8 +1219,35 @@ class ModeStack:
         if link is not None and not self.running("nav2"):
             logging.info("adopted stack has no nav2 — completing the mode")
             self.phase = f"{self.phase}, starting nav2"
-            threading.Thread(target=self.prepare_nav2, args=(link,),
+            threading.Thread(target=self._complete_adopted, args=(link,),
                              daemon=True).start()
+
+    # How long to let TF fill before deciding an adopted stack has no pose.
+    # This process starts with an empty buffer while AMCL or cartographer has
+    # been publishing all along, so the first lookups fail for reasons that
+    # have nothing to do with the robot.
+    ADOPT_POSE_WAIT_S = 20.0
+
+    def _complete_adopted(self, link: "RobotLink"):
+        """Finish a mode that was adopted without its full layer set.
+
+        Waits for a pose first. ensure_nav2 refuses without one, and in
+        localize mode it asks the user to set the position rather than
+        waiting — right when a person picked the mode, wrong here, where
+        AMCL has been localized all along and only this process is new.
+        Observed on the robot: adopted a localized stack and sat on "set the
+        robot's position first" with map->base_footprint resolving fine.
+        """
+        deadline = time.monotonic() + self.ADOPT_POSE_WAIT_S
+        while time.monotonic() < deadline:
+            if link.pose() is not None:
+                break
+            time.sleep(0.5)
+        else:
+            logging.info("adopted stack has no pose after %.0fs — leaving Nav2 "
+                         "to the normal path", self.ADOPT_POSE_WAIT_S)
+            return
+        self.prepare_nav2(link)
 
     def _started_at(self, name: str) -> int:
         i = self.sup.info(self.PROGRAM[name])
