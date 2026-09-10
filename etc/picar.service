@@ -12,7 +12,11 @@ Wants=network-online.target
 Type=simple
 # supervisord needs both to exist before it starts: childlogdir is fatal if
 # missing, and the layers read their arguments from run/.
-ExecStartPre=-/bin/mkdir -p @WS@/logs @WS@/run
+# install -d, not mkdir: ExecStartPre runs as root, so a plain mkdir leaves
+# these owned by root and the container — which runs as @UID@ — cannot write
+# its layer arguments or logs. The failure surfaces as a PermissionError on
+# run/<layer>.args.tmp long after start, with the stack apparently healthy.
+ExecStartPre=-/usr/bin/install -d -o @UID@ -g @GID@ @WS@/logs @WS@/run
 ExecStartPre=-/usr/bin/docker rm -f picar2
 ExecStart=/usr/bin/docker run --rm --name picar2 @FLAGS@ \
   -e PICAR_PROFILE=robot \

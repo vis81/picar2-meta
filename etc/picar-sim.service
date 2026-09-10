@@ -13,7 +13,11 @@ After=docker.service
 
 [Service]
 Type=simple
-ExecStartPre=-/bin/mkdir -p @WS@/logs @WS@/run
+# install -d, not mkdir: ExecStartPre runs as root, so a plain mkdir leaves
+# these owned by root and the container — which runs as @UID@ — cannot write
+# its layer arguments or logs. The failure surfaces as a PermissionError on
+# run/<layer>.args.tmp long after start, with the stack apparently healthy.
+ExecStartPre=-/usr/bin/install -d -o @UID@ -g @GID@ @WS@/logs @WS@/run
 ExecStartPre=-/usr/bin/docker rm -f picar2-sim
 # No --privileged and no /dev: there is no hardware to reach. /dev/dri is
 # passed for GPU rendering, and the X socket for the Gazebo window — set

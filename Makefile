@@ -550,6 +550,8 @@ stack-setup:
 	sed -e 's|@FLAGS@|$(_SVC_DOCKER_FLAGS)|g' \
 	    -e 's|@IMAGE@|$(IMAGE)|g' \
 	    -e 's|@WS@|$(WS)|g' \
+	    -e 's|@UID@|$(shell id -u)|g' \
+	    -e 's|@GID@|$(shell id -g)|g' \
 	    -e 's|@LIDAR@|$(strip $(LIDAR))|g' \
 	    -e 's|@USE_JOY@|$(strip $(USE_JOY))|g' \
 	    -e 's|@PORT@|$(WEBUI_PORT)|g' \
@@ -564,6 +566,8 @@ stack-sim-setup:
 	sed -e 's|@SIMFLAGS@|$(_SIM_DOCKER_FLAGS)|g' \
 	    -e 's|@IMAGE@|$(IMAGE)|g' \
 	    -e 's|@WS@|$(WS)|g' \
+	    -e 's|@UID@|$(shell id -u)|g' \
+	    -e 's|@GID@|$(shell id -g)|g' \
 	    -e 's|@HEADLESS@|$(strip $(HEADLESS))|g' \
 	    -e 's|@PORT@|$(WEBUI_PORT)|g' \
 	    -e 's|@DISPLAY@|$(DISPLAY)|g' \
