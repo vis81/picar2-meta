@@ -271,7 +271,12 @@ class RobotLink(Node):
         an already-subscribed listener gets no replay, so the whole chain
         below odom would be gone for good.
         """
-        self._tf_valid_from = time.time()
+        # The node's clock, not time.time(): under use_sim_time the transform
+        # stamps are simulation time (seconds since the sim started) while
+        # time.time() is the wall clock, so every transform compares as older
+        # than the cutoff and the pose is rejected forever. On the robot the
+        # two agree, which is why this only ever showed up in Gazebo.
+        self._tf_valid_from = self.get_clock().now().nanoseconds * 1e-9
         self.pose_error = "no lookup yet"
 
     def _on_costmap(self, msg: OccupancyGrid):
@@ -1997,6 +2002,11 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "phase": modes.phase,
             "explore_status": link.explore_status,
             "pose": pose,
+            # Computed on every failed lookup and, until now, visible nowhere:
+            # a null pose is the symptom of a broken TF chain and this says
+            # where the break is. Diagnosing a sim-only pose failure without it
+            # took a detour through tf2_echo.
+            "pose_error": link.pose_error,
             "map_seq": seq,
             "has_map": grid is not None,
             "nav": link.nav_status(),
