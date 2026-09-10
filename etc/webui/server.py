@@ -2028,6 +2028,11 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "localized": modes.mode == "localize" and pose is not None,
             "modes": modes.status(),
             "slam_backend": modes.slam_backend,
+            # robot | sim. The UI does not branch on it, but anything talking
+            # to this API should be able to tell what it is talking to without
+            # being told — a test run against the wrong one is worth catching
+            # before it drives something.
+            "profile": os.environ.get("PICAR_PROFILE", "robot"),
             "detail": modes.detail(),
             "phase": modes.phase,
             "explore_status": link.explore_status,

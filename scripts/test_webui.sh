@@ -1,15 +1,33 @@
 #!/usr/bin/env bash
-# End-to-end test of the web UI's controls, against the sim or the robot.
+# End-to-end test of the web UI's controls.
 #
-#   scripts/test_webui.sh                          # sim on this machine
-#   scripts/test_webui.sh --host 192.168.1.68 --container picar2 --allow-motion
-#   scripts/test_webui.sh --only speed,supervision # just those sections
+# Start the stack yourself first — this script never starts or stops it:
+#
+#     sudo systemctl start picar          # the robot
+#     sudo systemctl start picar-sim      # Gazebo on a workstation
+#
+# then point the script at it. It asks the running system what it is rather
+# than being told, so the same invocation works for either:
+#
+#   scripts/test_webui.sh                              # whatever is on localhost
+#   scripts/test_webui.sh --host 192.168.1.68          # a robot on the network
+#   scripts/test_webui.sh --only speed,supervision     # just those sections
+#
+# --host is normally the only thing you need. A non-local host is assumed to be
+# reachable over ssh as the same machine, which is how the container-level
+# checks get there; --ssh-user changes the login, --ssh overrides the target
+# outright, and --container names it if discovery guesses wrong.
 #
 # Sections: modes speed backend costmap waypoints save localize motion
 #           explore supervision logs
 #
 # Every check goes through the same HTTP API the phone uses, so it exercises
-# what a person actually touches rather than the internals underneath.
+# what a person actually touches rather than the internals underneath. A few
+# checks need to look inside the container — which SLAM node is really running,
+# how many publishers /map has, whether restarting one layer disturbs another.
+# Those need docker access: local by default, or over --ssh for a robot across
+# the network. Without it they are skipped rather than failed, and everything
+# else still runs.
 #
 # Sections that command movement (drive, route, explore) are skipped unless
 # --allow-motion is given. On the robot that is the difference between a test
@@ -21,7 +39,9 @@ set -uo pipefail
 
 HOST=localhost
 PORT=8080
-CONTAINER=picar2-sim
+CONTAINER=""          # discovered from the running system unless given
+SSH=""                # user@host for docker on another machine
+SSH_USER=pi           # login used when --host is remote and --ssh is not given
 ALLOW_MOTION=0
 ONLY=""
 TEST_MAP=uitest
@@ -32,6 +52,8 @@ while [ $# -gt 0 ]; do
         --host)      HOST="$2"; shift 2 ;;
         --port)      PORT="$2"; shift 2 ;;
         --container) CONTAINER="$2"; shift 2 ;;
+        --ssh)       SSH="$2"; shift 2 ;;
+        --ssh-user)  SSH_USER="$2"; shift 2 ;;
         --allow-motion) ALLOW_MOTION=1; shift ;;
         --only)      ONLY="$2"; shift 2 ;;
         --keep)      KEEP=1; shift ;;          # leave the test map behind
@@ -80,14 +102,26 @@ waitfor() {
     return 1
 }
 
-ros() { docker exec "$CONTAINER" bash -lc "
+# docker, wherever it lives. Empty CONTAINER means the container-level checks
+# were not available and their callers skip.
+dock() { if [ -n "$SSH" ]; then ssh -o ConnectTimeout=8 "$SSH" docker "$@"
+         else docker "$@"; fi; }
+
+# Runs a ros2 command inside the container, on the same DDS domain the stack
+# is actually using. Taken from supervisord's own environment rather than a
+# file or a guess: the sim puts itself on its own domain so it can never drive
+# the robot, and a checker on the wrong domain sees an empty graph and reports
+# a healthy system as broken.
+ros() { dock exec "$CONTAINER" bash -lc "
 source /opt/ros/jazzy/setup.bash
 source /ws/install-docker/setup.bash 2>/dev/null
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-[ -n \"\${ROS_DOMAIN_ID:-}\" ] || export ROS_DOMAIN_ID=\$(cat /ws/run/domain 2>/dev/null || echo 0)
+dom=\$(tr '\\0' '\\n' < /proc/1/environ 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)
+[ -n \"\$dom\" ] || dom=\$(tr '\\0' '\\n' < /proc/\$(pgrep -f webui/server.py | head -1)/environ 2>/dev/null | sed -n 's/^ROS_DOMAIN_ID=//p' | head -1)
+export ROS_DOMAIN_ID=\${dom:-0}
 $1" 2>/dev/null; }
 
-sup() { docker exec "$CONTAINER" supervisorctl -c /ws/etc/supervisord.conf "$@" 2>&1; }
+sup() { dock exec "$CONTAINER" supervisorctl -c /ws/etc/supervisord.conf "$@" 2>&1; }
 suppid() { sup status "$1" | awk '{print $4}' | tr -d ,; }
 
 want() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *,"$1",*) return 0;; esac; return 1; }
@@ -97,19 +131,77 @@ section() { printf '\n  \033[1m=== %s ===\033[0m\n' "$1"; }
 # broadcast map->odom, so two at once is the bug this invariant exists to catch.
 one_map_publisher() {
     local n
+    if [ -z "$CONTAINER" ]; then skip "$1" "no docker access"; return; fi
     n=$(ros 'timeout 10 ros2 topic info /map 2>/dev/null | grep -c "Publisher count: 1"')
     chk "$1" "${n:-0}" "1"
 }
 
+# A check that needs to look inside the container; skipped, not failed, when
+# only the HTTP API is reachable.
+chk_ros() {  # name, command, want
+    if [ -z "$CONTAINER" ]; then skip "$1" "no docker access"; return; fi
+    chk "$1" "$(ros "$2")" "$3"
+}
+
 # ── preflight ────────────────────────────────────────────────────────────────
-printf '  target: %s:%s  container=%s  motion=%s\n' \
-       "$HOST" "$PORT" "$CONTAINER" "$([ $ALLOW_MOTION = 1 ] && echo allowed || echo blocked)"
+# The stack has to be up already. Starting it here would mean guessing which
+# one was wanted, and on a robot that guess moves hardware.
 if ! curl -s -m 8 "$API/status" >/dev/null 2>&1; then
-    echo "  the web UI is not answering on $API — is the stack up?" >&2
+    cat >&2 <<MSG
+  Nothing is answering on $API.
+
+  Start the stack first, then re-run:
+      sudo systemctl start picar          # robot
+      sudo systemctl start picar-sim      # Gazebo
+  or point this at another machine with --host / --ssh.
+MSG
     exit 2
 fi
-if ! docker exec "$CONTAINER" true 2>/dev/null; then
-    echo "  note: container '$CONTAINER' not reachable; ROS-level checks will be skipped" >&2
+
+# Where docker lives follows from where the UI lives: a non-local host is the
+# same machine the container is on, so ssh there. One --host is then enough for
+# a robot across the network, and nothing needs to know whether it is a Pi or
+# this workstation.
+if [ -z "$SSH" ]; then
+    case "$HOST" in
+        localhost|127.0.0.1|::1|"$(hostname)") ;;      # local docker
+        *) SSH="$SSH_USER@$HOST" ;;
+    esac
+fi
+
+# Ask the running system what it is. PROFILE is absent on an older build, in
+# which case the container name is the only clue left.
+PROFILE=$(st 'd.get("profile","")')
+[ -n "$PROFILE" ] || PROFILE=unknown
+
+# Find the container unless told. Names come from etc/picar.service and
+# etc/picar-sim.service; profile order matters so a machine running both is
+# not tested through the wrong one.
+if [ -z "$CONTAINER" ]; then
+    case "$PROFILE" in
+        sim)   cands="picar2-sim picar2" ;;
+        robot) cands="picar2 picar2-sim" ;;
+        *)     cands="picar2 picar2-sim" ;;
+    esac
+    for c in $cands; do
+        if dock exec "$c" true 2>/dev/null; then CONTAINER="$c"; break; fi
+    done
+elif ! dock exec "$CONTAINER" true 2>/dev/null; then
+    # Named but not reachable. Clearing it makes the container checks skip;
+    # leaving it set made them run and fail, which reads as a broken robot
+    # rather than a missing login.
+    echo "  note: container '$CONTAINER' is not reachable — those checks will skip" >&2
+    CONTAINER=""
+fi
+
+printf '  target : %s:%s\n' "$HOST" "$PORT"
+printf '  profile: %s\n' "$PROFILE"
+printf '  docker : %s\n' \
+       "$([ -n "$CONTAINER" ] && echo "$CONTAINER${SSH:+ via $SSH}" || echo 'unavailable — container checks will skip')"
+printf '  motion : %s\n' "$([ $ALLOW_MOTION = 1 ] && echo allowed || echo blocked)"
+if [ "$PROFILE" = robot ] && [ $ALLOW_MOTION = 1 ]; then
+    printf '  \033[33m!! this is a real robot and movement is enabled — it will drive\033[0m\n'
+    sleep 3
 fi
 # Start from a known backend. It is process state, so a previous run that
 # selected slam_toolbox would otherwise have the modes section bring up the
@@ -155,12 +247,12 @@ if want backend; then
 section "SLAM backend"
 chk "switch refused while mapping"  "$(post slam '{"backend":"slam_toolbox"}' | jok)" "False"
 chk "unknown backend refused"       "$(post slam '{"backend":"gmapping"}' | jok)" "False"
-chk "cartographer is the live node" "$(ros 'timeout 10 ros2 node list 2>/dev/null | grep -c cartographer_node')" "1"
+chk_ros "cartographer is the live node" 'timeout 10 ros2 node list 2>/dev/null | grep -c cartographer_node' "1"
 post mode '{"mode":"idle"}' >/dev/null; sleep 8
 chk "switch allowed when idle"      "$(post slam '{"backend":"slam_toolbox"}' | jok)" "True"
 chk "reported in status"            "$(st 'd["slam_backend"]')" "slam_toolbox"
 post mode '{"mode":"mapping"}' >/dev/null; sleep 20
-chk "slam_toolbox is the live node" "$(ros 'timeout 10 ros2 node list 2>/dev/null | grep -c slam_toolbox')" "1"
+chk_ros "slam_toolbox is the live node" 'timeout 10 ros2 node list 2>/dev/null | grep -c slam_toolbox' "1"
 # Put the stack back the way this section found it. Leaving slam_toolbox
 # running made the save section fail against cartographer's services and
 # cascade into localize — a test that changes state has to restore it, and
@@ -169,7 +261,7 @@ post mode '{"mode":"idle"}' >/dev/null; sleep 8
 post slam '{"backend":"cartographer"}' >/dev/null 2>&1
 post mode '{"mode":"mapping"}' >/dev/null
 waitfor 'd["nav_ready"]' 40 || true
-chk "cartographer restored" "$(ros 'timeout 10 ros2 node list 2>/dev/null | grep -c cartographer_node')" "1"
+chk_ros "cartographer restored" 'timeout 10 ros2 node list 2>/dev/null | grep -c cartographer_node' "1"
 fi
 
 # ── costmap overlay ──────────────────────────────────────────────────────────
@@ -283,8 +375,8 @@ fi
 # neighbours down, and a restarted UI picks the running stack back up.
 if want supervision; then
 section "supervision"
-if ! docker exec "$CONTAINER" true 2>/dev/null; then
-    skip "restart independence and adoption" "container not reachable"
+if [ -z "$CONTAINER" ]; then
+    skip "restart independence and adoption" "no docker access — pass --ssh"
 else
     b=$(suppid bringup)
     sup restart webui >/dev/null; sleep 16
