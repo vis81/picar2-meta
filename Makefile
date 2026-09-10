@@ -156,7 +156,7 @@ endif
 
 .PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
-        docker-start docker-stop sync2pi softap softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
+        docker-start docker-stop sync2pi softap stack-setup stack-sim-setup stack-status stack-logs softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
 all: build
 
@@ -168,11 +168,16 @@ image:
 # One-time setup: sudo apt-get install docker-buildx-plugin
 #                 docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 #                 docker buildx create --name multiarch && docker buildx use multiarch && docker buildx inspect --bootstrap
+# Tagged -arm64, not $(IMAGE): building arm64 under the plain tag replaces the
+# amd64 image on this machine, and `make sim` then runs an emulated arm64 stack
+# without saying so. image-push retags it on the Pi, where the plain name is
+# what the services expect.
+IMAGE_ARM := $(IMAGE)-arm64
 image-pi:
-	docker buildx build --platform linux/arm64 --build-arg BASE_IMAGE=ros:jazzy-ros-base -t $(IMAGE) --load .
+	docker buildx build --platform linux/arm64 --build-arg BASE_IMAGE=ros:jazzy-ros-base -t $(IMAGE_ARM) --load .
 
 image-push:
-	docker save $(IMAGE) | gzip | ssh pi@$(PI_IP) 'docker load'
+	docker save $(IMAGE_ARM) | gzip | ssh pi@$(PI_IP) 'docker load && docker tag $(IMAGE_ARM) $(IMAGE)'
 
 # ── Persistent container (use with EXEC_ENV=docker) ──────────────────────────
 # Starts a long-lived container with all necessary flags. All make targets
@@ -528,6 +533,49 @@ webui-setup:
 
 webui-stop:
 	sudo systemctl stop picar-webui picar-bringup
+
+# ── One-container stack (supervisord) ────────────────────────────────────────
+# Replaces webui-setup's picar-bringup + picar-webui pair. Those made the
+# navigation layers children of the web UI, so restarting the UI tore down AMCL
+# and Nav2 with it. See etc/supervisord.conf.
+#   make stack-setup                 install and start picar.service (robot)
+#   make stack-sim-setup             install picar-sim.service (workstation)
+#   make stack-status                what supervisord has running
+_SIM_DOCKER_FLAGS := --network host --ipc host \
+                     -u $(shell id -u):$(shell id -g) \
+                     -v $(WS):/ws -w /ws \
+                     -v /tmp/.X11-unix:/tmp/.X11-unix
+
+stack-setup:
+	sed -e 's|@FLAGS@|$(_SVC_DOCKER_FLAGS)|g' \
+	    -e 's|@IMAGE@|$(IMAGE)|g' \
+	    -e 's|@WS@|$(WS)|g' \
+	    -e 's|@LIDAR@|$(strip $(LIDAR))|g' \
+	    -e 's|@USE_JOY@|$(strip $(USE_JOY))|g' \
+	    -e 's|@PORT@|$(WEBUI_PORT)|g' \
+	    $(WS)/etc/picar.service | sudo tee /etc/systemd/system/picar.service >/dev/null
+	sudo systemctl daemon-reload
+	@# The old pair would fight this one for /dev and the DDS domain.
+	-sudo systemctl disable --now picar-webui picar-bringup 2>/dev/null
+	sudo systemctl enable --now picar.service
+	@ip="$$(hostname -I | awk '{print $$1}')"; echo ""; echo "  http://$$ip:$(WEBUI_PORT)/"; echo ""
+
+stack-sim-setup:
+	sed -e 's|@SIMFLAGS@|$(_SIM_DOCKER_FLAGS)|g' \
+	    -e 's|@IMAGE@|$(IMAGE)|g' \
+	    -e 's|@WS@|$(WS)|g' \
+	    -e 's|@HEADLESS@|$(strip $(HEADLESS))|g' \
+	    -e 's|@PORT@|$(WEBUI_PORT)|g' \
+	    -e 's|@DISPLAY@|$(DISPLAY)|g' \
+	    $(WS)/etc/picar-sim.service | sudo tee /etc/systemd/system/picar-sim.service >/dev/null
+	sudo systemctl daemon-reload
+	@echo "  installed. start with: sudo systemctl start picar-sim"
+
+stack-status:
+	docker exec $(if $(SIM),picar2-sim,picar2) supervisorctl -c /ws/etc/supervisord.conf status
+
+stack-logs:
+	tail -n $(or $(N),40) -F $(WS)/logs/$(or $(LAYER),webui).log
 
 # ── FPV (Meta Quest 3) — MediaMTX on host (not docker) + WebXR client ────────
 # fpv-setup: one-time installer (libcamera-apps, MediaMTX, TLS cert, systemd unit).
