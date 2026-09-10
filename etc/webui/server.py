@@ -1205,6 +1205,14 @@ class ModeStack:
         elif localizing:
             self.mode = "localize"
             self.map_name = self._map_name_from_args()
+            # _to_localize loads these when a person picks the mode; adoption
+            # has to as well, or a restarted UI shows an empty route over a
+            # map whose waypoints are sitting on disk. They belong to the map,
+            # so the map name is what selects them.
+            if link is not None and self.ws and self.map_name:
+                link.waypoints = load_waypoints(self.ws, self.map_name)
+                logging.info("adopted %d waypoint(s) for %s",
+                             len(link.waypoints), self.map_name)
             self.phase = "localized (adopted)"
         else:
             return
@@ -2375,6 +2383,10 @@ def main() -> int:
     rclpy.init()
     link = RobotLink()
     modes = ModeStack()
+    # build_app sets this too, but that runs after adopt() and adoption needs
+    # it to find the map's saved waypoints. Setting it here rather than
+    # reordering, so there is one obvious place the workspace is known.
+    modes.ws = args.ws
 
     spin = threading.Thread(target=rclpy.spin, args=(link,), daemon=True)
     spin.start()
