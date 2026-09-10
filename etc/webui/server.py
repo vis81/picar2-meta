@@ -91,6 +91,13 @@ class RobotLink(Node):
         self.create_subscription(OccupancyGrid, "/global_costmap/costmap",
                                  self._on_costmap, map_qos)
         self._costmap_free = 0
+        # The local costmap is what the robot believes is in its way right
+        # now — the lidar and ToF returns after marking and inflation. Worth
+        # showing: a false obstacle is invisible on the static map, and that
+        # is exactly the failure that cost a test route most of one leg.
+        self.create_subscription(OccupancyGrid, "/local_costmap/costmap",
+                                 self._on_local_costmap, map_qos)
+        self._local: OccupancyGrid | None = None
 
         self._cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         # explore_lite stops permanently the first time it finds no frontiers.
@@ -256,6 +263,61 @@ class RobotLink(Node):
 
     def costmap_free(self) -> int:
         return self._costmap_free
+
+    def _on_local_costmap(self, msg: OccupancyGrid):
+        with self._lock:
+            self._local = msg
+
+    def local_cell_size(self) -> float:
+        with self._lock:
+            return self._local.info.resolution if self._local else 0.05
+
+    # Lethal and inscribed. Inflation below this is derived from these cells
+    # rather than sensed, so drawing it would triple the point count to say
+    # the same thing.
+    OBSTACLE_COST = 99
+
+    def local_obstacles(self) -> tuple[bytes | None, str]:
+        """Marked cells of the local costmap as map-frame xy pairs.
+
+        Transformed here rather than in the browser because the costmap is
+        published in odom while the UI draws in map. Those frames differ by
+        the localisation correction, which is a rotation as well as an
+        offset: sending the grid and its origin would smear every obstacle
+        by up to a quarter of a metre across a 3 m window at a few degrees
+        of yaw error, and put them somewhere the robot never saw anything.
+        """
+        with self._lock:
+            msg = self._local
+        if msg is None:
+            return None, "no local costmap published yet"
+        info = msg.info
+        cells = np.frombuffer(bytes(msg.data), dtype=np.int8)
+        if cells.size != info.width * info.height:
+            return None, "costmap data does not match its declared size"
+        idx = np.nonzero(cells >= self.OBSTACLE_COST)[0]
+        if idx.size == 0:
+            return b"", ""
+        rows, cols = np.divmod(idx, info.width)
+        # Cell centres in the costmap's own frame.
+        px = info.origin.position.x + (cols + 0.5) * info.resolution
+        py = info.origin.position.y + (rows + 0.5) * info.resolution
+
+        frame = msg.header.frame_id or "odom"
+        if frame.lstrip("/") != "map":
+            try:
+                tf = self._tf_buffer.lookup_transform("map", frame, Time())
+            except Exception as e:                           # noqa: BLE001
+                # Better nothing than obstacles drawn somewhere the robot
+                # never actually saw anything.
+                return None, "no %s->map transform: %s" % (frame, e)
+            t = tf.transform.translation
+            q = tf.transform.rotation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            c, sn = math.cos(yaw), math.sin(yaw)
+            px, py = t.x + c * px - sn * py, t.y + sn * px + c * py
+        return np.column_stack([px, py]).astype(np.float32).tobytes(), ""
 
     def has_map(self) -> bool:
         with self._lock:
@@ -1719,6 +1781,24 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         resp.headers["X-Map-Resolution"] = str(info.resolution)
         resp.headers["X-Map-Origin-X"] = str(info.origin.position.x)
         resp.headers["X-Map-Origin-Y"] = str(info.origin.position.y)
+        return resp
+
+    @app.route("/api/costmap")
+    def get_costmap():
+        """Marked cells of the local costmap, as raw float32 map-frame xy.
+
+        Binary rather than JSON: a 3 m window at 5 cm is 3600 cells, and in a
+        cluttered room enough of them are marked that the JSON of the same
+        thing is several times the size, fetched twice a second.
+        """
+        pts, why = link.local_obstacles()
+        if pts is None:
+            return (why, 404)
+        resp = Response(pts, mimetype="application/octet-stream")
+        resp.headers["X-Count"] = str(len(pts) // 8)
+        # The drawn square is one costmap cell, so the client needs the
+        # costmap's resolution, not the map's — they are configured apart.
+        resp.headers["X-Cell"] = str(link.local_cell_size())
         return resp
 
     @app.route("/api/mode", methods=["POST"])

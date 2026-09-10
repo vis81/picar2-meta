@@ -15,6 +15,12 @@ const ctx = canvas.getContext('2d');
 let driveLimits = [0.40, 1.18];
 
 let mapData = null;        // {w, h, res, ox, oy, img}
+// Marked cells of the local costmap, as map-frame metres [x0,y0,x1,y1,...].
+// What the robot currently believes is in its way, which the static map
+// cannot show — a false obstacle looks like empty floor there.
+let obstacles = null;
+let showObstacles = true;
+let obstacleCell = 0.05;   // costmap resolution, replaced by the response
 let mapSeq = -1;
 let pose = null;
 let modes = {};
@@ -98,6 +104,32 @@ function fitView() {
   view.fitted = true;
 }
 
+async function fetchObstacles() {
+  if (!showObstacles) { obstacles = null; return; }
+  try {
+    const r = await fetch('/api/costmap');
+    if (!r.ok) { obstacles = null; return; }
+    obstacleCell = parseFloat(r.headers.get('X-Cell')) || obstacleCell;
+    obstacles = new Float32Array(await r.arrayBuffer());
+  } catch (e) {
+    obstacles = null;            // a dropped poll should not freeze the view
+  }
+}
+
+function drawObstacles() {
+  if (!obstacles || !obstacles.length || !mapData) return;
+  // One cell, in grid units. Drawn as squares rather than dots so the cell
+  // grid stays legible when zoomed in — this view is read to judge whether
+  // an obstacle is real, and a blob hides how many cells are actually set.
+  const res = obstacleCell / mapData.res;
+  ctx.fillStyle = 'rgba(255, 92, 92, 0.55)';
+  for (let i = 0; i < obstacles.length; i += 2) {
+    const gx = (obstacles[i] - mapData.ox) / mapData.res;
+    const gy = mapData.h - (obstacles[i + 1] - mapData.oy) / mapData.res;
+    ctx.fillRect(gx - res / 2, gy - res / 2, res, res);
+  }
+}
+
 function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#11141a';
@@ -107,6 +139,10 @@ function draw() {
     ctx.imageSmoothingEnabled = false;
     ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
     ctx.drawImage(mapData.img, 0, 0);
+
+    // Under the robot and the route: those are what you are steering, and
+    // the obstacles are context for them.
+    drawObstacles();
 
     if (pose) {
       // map metres → grid cells → canvas (already inside the view transform)
@@ -264,6 +300,10 @@ async function poll() {
     maps = s.maps || [];
     nav = s.nav || { state: 'idle', goal: null, distance: null };
     navReady = !!s.nav_ready;
+    // Alongside the status poll rather than on its own timer: one cadence to
+    // reason about, and an obstacle overlay older than the pose it sits
+    // under would be worse than none.
+    fetchObstacles();
     // Not while a step is in flight, or the poll would snap the display
     // back to the old value between the tap and the server's reply.
     if (!speedBusy) maxSpeed = s.max_speed;
@@ -564,10 +604,16 @@ async function stepSpeed(delta) {
 
 $('settings').onclick = () => {
   $('settingserr').textContent = '';
+  $('showobs').checked = showObstacles;
   renderSpeed();
   $('settingssheet').classList.remove('hidden');
 };
 $('cancel-settings').onclick = () => $('settingssheet').classList.add('hidden');
+
+$('showobs').onclick = (e) => {
+  showObstacles = e.target.checked;
+  if (!showObstacles) obstacles = null;   // clear immediately, not next poll
+};
 
 $('speeddown').onclick = () => stepSpeed(-SPEED_STEP);
 $('speedup').onclick   = () => stepSpeed(+SPEED_STEP);
