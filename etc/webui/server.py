@@ -1171,7 +1171,7 @@ class ModeStack:
         os.makedirs(self.LOG_DIR, exist_ok=True)
         os.makedirs(self.RUN_DIR, exist_ok=True)
 
-    def adopt(self):
+    def adopt(self, link: "RobotLink" = None):
         """Work out the current mode from what supervisord is already running.
 
         The layers outlive this process now, which is the point — but it means
@@ -1205,6 +1205,22 @@ class ModeStack:
             return
         logging.info("adopted running stack: mode=%s map=%s backend=%s",
                      self.mode, self.map_name, self.slam_backend)
+
+        # A mode is more than one layer, and a transition can be cut short —
+        # restarting the UI mid-switch leaves the map layer up with Nav2 never
+        # started, and nothing afterwards notices. Observed on the robot:
+        # adopted "mapping", no Nav2, autonomous controls greyed out forever
+        # with the stack looking healthy.
+        #
+        # prepare_nav2 is the same worker a real transition ends with: it joins
+        # the current generation, returns immediately if Nav2 is already up, and
+        # waits for a pose before starting it. Safe to call when nothing is
+        # missing, which is why it is not conditional on more than this.
+        if link is not None and not self.running("nav2"):
+            logging.info("adopted stack has no nav2 — completing the mode")
+            self.phase = f"{self.phase}, starting nav2"
+            threading.Thread(target=self.prepare_nav2, args=(link,),
+                             daemon=True).start()
 
     def _started_at(self, name: str) -> int:
         i = self.sup.info(self.PROGRAM[name])
@@ -2322,12 +2338,15 @@ def main() -> int:
     rclpy.init()
     link = RobotLink()
     modes = ModeStack()
-    # Before the first request: the layers outlive this process, so find out
-    # what is already running rather than reporting idle over a live stack.
-    modes.adopt()
 
     spin = threading.Thread(target=rclpy.spin, args=(link,), daemon=True)
     spin.start()
+
+    # After spin, before serving: the layers outlive this process, so find out
+    # what is already running rather than reporting idle over a live stack.
+    # After spin because completing an interrupted transition needs a pose,
+    # and a pose needs TF being processed.
+    modes.adopt(link)
 
     app = build_app(link, modes, args.ws, args.root)
     print(f"picar web UI on http://{args.bind}:{args.port}  (ws={args.ws})")
