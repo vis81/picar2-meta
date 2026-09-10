@@ -1756,15 +1756,38 @@ def save_map(ws: str, name: str) -> tuple[bool, str]:
             "map_saver",
         ),
     ]
+    # finish_trajectory is asynchronous: cartographer accepts it and runs the
+    # final optimisation in the background, so write_state issued straight
+    # after can race a trajectory that is still finishing. Observed on the
+    # robot — the first save failed, and a second click 24 s later found
+    # "Trajectory 0 already pending finish" and then succeeded. Retrying is
+    # the fix rather than a fixed sleep, because how long the optimisation
+    # takes depends on how large the map is.
+    ATTEMPTS = 4
+    BACKOFF_S = 6.0
     for cmd, label in steps:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        except subprocess.TimeoutExpired:
-            return False, f"{label} timed out — is cartographer still up?"
-        except OSError as e:
-            return False, f"{label} could not run: {e}"
-        if r.returncode != 0:
-            return False, f"{label} failed: {r.stderr.strip()[:200]}"
+        last = ""
+        for attempt in range(ATTEMPTS):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                return False, f"{label} timed out — is cartographer still up?"
+            except OSError as e:
+                return False, f"{label} could not run: {e}"
+            if r.returncode == 0:
+                break
+            # Both streams: the ros2 CLI puts some failures on stdout, and a
+            # message that only reached the browser is a failure nobody can
+            # diagnose afterwards — which is how the first occurrence of this
+            # very race was lost.
+            last = ((r.stderr or "") + (r.stdout or "")).strip()
+            logging.warning("save_map: %s attempt %d/%d failed: %s",
+                            label, attempt + 1, ATTEMPTS, last[:400])
+            if attempt < ATTEMPTS - 1:
+                time.sleep(BACKOFF_S)
+        else:
+            logging.error("save_map: %s gave up after %d attempts", label, ATTEMPTS)
+            return False, f"{label} failed after {ATTEMPTS} tries: {last[:200]}"
     return True, base
 
 
@@ -2289,6 +2312,10 @@ def main() -> int:
         print("ros2 not on PATH — source the workspace first", file=sys.stderr)
         return 1
 
+    # supervisord captures stdout to logs/webui.log; without this the
+    # warnings save_map emits never appear anywhere.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
     rclpy.init()
     link = RobotLink()
     modes = ModeStack()
