@@ -1786,7 +1786,7 @@ class ModeStack:
         self.sup.stop(self.PROGRAM[name])
 
 
-def save_map(ws: str, name: str) -> tuple[bool, str]:
+def save_map(ws: str, name: str, backend: str = "cartographer") -> tuple[bool, str]:
     """Seal the trajectory, write the pbstream, then the PGM/YAML pair.
 
     finish_trajectory ends mapping — cartographer cannot resume afterwards,
@@ -1796,25 +1796,47 @@ def save_map(ws: str, name: str) -> tuple[bool, str]:
     os.makedirs(maps, exist_ok=True)
     base = os.path.join(maps, name)
 
-    steps = [
-        (
-            ["ros2", "service", "call", "/finish_trajectory",
-             "cartographer_ros_msgs/srv/FinishTrajectory",
-             "{trajectory_id: 0}"],
-            "finish_trajectory",
-        ),
-        (
-            ["ros2", "service", "call", "/write_state",
-             "cartographer_ros_msgs/srv/WriteState",
-             f"{{filename: '{base}.pbstream', include_unfinished_submaps: false}}"],
-            "write_state",
-        ),
-        (
-            ["ros2", "run", "nav2_map_server", "map_saver_cli", "-f", base,
-             "--ros-args", "-p", "map_subscribe_transient_local:=true"],
-            "map_saver",
-        ),
-    ]
+    # The two backends seal a map through entirely different services, and
+    # calling cartographer's at a live slam_toolbox does not fail fast — it
+    # waits out the 120 s service timeout and reports "is cartographer still
+    # up?", which is true and useless. Found by the UI test sweep, after the
+    # backend selector shipped without anyone saving a slam_toolbox map.
+    if backend == "slam_toolbox":
+        steps = [
+            (
+                ["ros2", "service", "call", "/slam_toolbox/serialize_map",
+                 "slam_toolbox/srv/SerializePoseGraph",
+                 f"{{filename: '{base}'}}"],
+                "serialize_map",
+            ),
+            (
+                # Writes the pgm/yaml pair itself, so no separate map_saver.
+                ["ros2", "service", "call", "/slam_toolbox/save_map",
+                 "slam_toolbox/srv/SaveMap",
+                 f"{{name: {{data: '{base}'}}}}"],
+                "save_map",
+            ),
+        ]
+    else:
+        steps = [
+            (
+                ["ros2", "service", "call", "/finish_trajectory",
+                 "cartographer_ros_msgs/srv/FinishTrajectory",
+                 "{trajectory_id: 0}"],
+                "finish_trajectory",
+            ),
+            (
+                ["ros2", "service", "call", "/write_state",
+                 "cartographer_ros_msgs/srv/WriteState",
+                 f"{{filename: '{base}.pbstream', include_unfinished_submaps: false}}"],
+                "write_state",
+            ),
+            (
+                ["ros2", "run", "nav2_map_server", "map_saver_cli", "-f", base,
+                 "--ros-args", "-p", "map_subscribe_transient_local:=true"],
+                "map_saver",
+            ),
+        ]
     # finish_trajectory is asynchronous: cartographer accepts it and runs the
     # final optimisation in the background, so write_state issued straight
     # after can race a trajectory that is still finishing. Observed on the
@@ -2279,11 +2301,11 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             # finish_trajectory would block until its 120 s timeout, which
             # surfaces as a raw 500 the client cannot parse.
             return jsonify({"ok": False,
-                            "error": "cartographer isn't mapping"}), 409
+                            "error": f"{modes.slam_backend} isn't mapping"}), 409
 
         # Stop exploring first so the robot is still while the graph is sealed.
         modes.stop_explore()
-        ok, detail = save_map(ws, name)
+        ok, detail = save_map(ws, name, modes.slam_backend)
         if ok and link.waypoints:
             # The route was placed on this map while mapping it, so it keeps
             # its meaning once the map has a name.
