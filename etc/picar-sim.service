@@ -1,0 +1,32 @@
+[Unit]
+# The same stack against Gazebo instead of the robot. Identical to
+# picar.service except for the profile and the container flags: supervisord
+# runs the same six programs, and only `bringup` differs — sim.launch.py in
+# place of picar2.launch.py, with use_sim_time appended to the layers that
+# declare it. See etc/run-layer.sh.
+#
+# For a workstation, not the Pi. The image needs Gazebo, which is installed
+# only on the amd64 build (see the arch guard in the Dockerfile).
+Description=PICAR-2 stack in Gazebo (docker + supervisord)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/bin/mkdir -p @WS@/logs @WS@/run
+ExecStartPre=-/usr/bin/docker rm -f picar2-sim
+# No --privileged and no /dev: there is no hardware to reach. /dev/dri is
+# passed for GPU rendering, and the X socket for the Gazebo window — set
+# PICAR_HEADLESS=true to run without either.
+ExecStart=/usr/bin/docker run --rm --name picar2-sim @SIMFLAGS@ \
+  -e PICAR_PROFILE=sim \
+  -e PICAR_HEADLESS=@HEADLESS@ \
+  -e PICAR_WEBUI_PORT=@PORT@ \
+  -e DISPLAY=@DISPLAY@ \
+  @IMAGE@ /usr/bin/supervisord -c /ws/etc/supervisord.conf
+ExecStop=/usr/bin/docker stop -t 45 picar2-sim
+Restart=no
+TimeoutStopSec=70
+
+[Install]
+WantedBy=multi-user.target

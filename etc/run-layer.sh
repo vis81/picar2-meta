@@ -35,6 +35,14 @@ if [ -z "$profile" ] && [ -r /ws/run/profile ]; then
 fi
 profile="${profile:-robot}"
 
+# A simulator on the same DDS domain as the robot is a hazard, not a
+# convenience: both are on the same LAN, topic names are identical, and the
+# sim's /cmd_vel would drive the real vehicle. Put sim on its own domain, the
+# same reasoning the benchmark uses.
+if [ "$profile" = "sim" ]; then
+    export ROS_DOMAIN_ID="${PICAR_DOMAIN_ID:-1}"
+fi
+
 # Defaults for the layers whose arguments never vary, so a missing args file is
 # normal rather than a failure. The parameterised layers have no default: being
 # asked to start one without arguments is a bug in the caller, and guessing a
@@ -78,6 +86,27 @@ if [ -r "$args_file" ]; then
     args="$(cat "$args_file")"
 else
     args="$(default_args "$layer")"
+fi
+
+# Gazebo needs two things the robot does not: third-party world files usually
+# lack the system plugins that make them load at all (scripts/patch_gz_world.py
+# injects them and prints a patched copy), and the model path has to be exported
+# before launch. Doing it here rather than in a make eval is what lets the sim
+# run as a plain service.
+if [ "$profile" = "sim" ] && [ "$layer" = "bringup" ]; then
+    export GZ_SIM_RESOURCE_PATH="${PICAR_GZ_RESOURCE_PATH:-/ws/install-docker/picar2_description/share}"
+    world="${PICAR_WORLD:-/ws/install-docker/picar2_bringup/share/picar2_bringup/worlds/room.sdf}"
+    if [ -r "$world" ]; then
+        patched="$(python3 /ws/scripts/patch_gz_world.py "$world")" || patched="$world"
+        # Only when the args file did not already name a world, so an explicit
+        # choice there still wins.
+        case "$args" in
+            *world:=*) ;;
+            *) args="$args world:=$patched" ;;
+        esac
+    else
+        echo "run-layer.sh: world '$world' not readable; letting sim.launch.py pick its default" >&2
+    fi
 fi
 
 case "$layer" in

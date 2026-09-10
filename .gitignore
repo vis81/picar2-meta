@@ -17,3 +17,5 @@ setenv.sh
 # workspace is bind-mounted, so this is the one place a log survives the
 # container that wrote it.
 logs/
+# Layer arguments and the active profile, written at run time by the web UI.
+run/

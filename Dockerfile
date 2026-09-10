@@ -10,6 +10,13 @@ COPY src/vizanti/vizanti_cpp/package.xml            /tmp/src/vizanti_cpp/package
 COPY src/vizanti/vizanti_msgs/package.xml           /tmp/src/vizanti_msgs/package.xml
 COPY src/vizanti/vizanti_server/package.xml         /tmp/src/vizanti_server/package.xml
 COPY src/vizanti/vizanti_demos/package.xml          /tmp/src/vizanti_demos/package.xml
+# explore_lite: picar2_bringup exec_depends on explore_lite_msgs, and the web UI
+# subscribes to /explore/status. Without its package.xml here rosdep cannot see
+# it as a workspace package and tries to resolve it as a system dependency,
+# which fails the whole layer with "Cannot locate rosdep definition".
+COPY src/explore_lite/explore/package.xml           /tmp/src/explore/package.xml
+COPY src/explore_lite/explore_lite_msgs/package.xml /tmp/src/explore_lite_msgs/package.xml
+COPY src/explore_lite/map_merge/package.xml         /tmp/src/map_merge/package.xml
 
 RUN apt-get update \
  && rosdep update \

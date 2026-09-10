@@ -1,0 +1,32 @@
+[Unit]
+# The whole robot stack in one container, supervised from inside. Replaces the
+# old picar-bringup + picar-webui pair: those made the navigation layers
+# children of the web UI, so restarting the UI to pick up a change tore down
+# AMCL and Nav2 with it. See etc/supervisord.conf.
+Description=PICAR-2 stack (docker + supervisord)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# supervisord needs both to exist before it starts: childlogdir is fatal if
+# missing, and the layers read their arguments from run/.
+ExecStartPre=-/bin/mkdir -p @WS@/logs @WS@/run
+ExecStartPre=-/usr/bin/docker rm -f picar2
+ExecStart=/usr/bin/docker run --rm --name picar2 @FLAGS@ \
+  -e PICAR_PROFILE=robot \
+  -e PICAR_LIDAR=@LIDAR@ \
+  -e PICAR_USE_JOY=@USE_JOY@ \
+  -e PICAR_WEBUI_PORT=@PORT@ \
+  @IMAGE@ /usr/bin/supervisord -c /ws/etc/supervisord.conf
+# Generous: supervisord stops its programs in turn, and a ros2 launch tree can
+# take 20 s to go down cleanly. Killing it early orphans nodes that are still
+# publishing, which for two map sources at once is not merely untidy.
+ExecStop=/usr/bin/docker stop -t 45 picar2
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=70
+
+[Install]
+WantedBy=multi-user.target
