@@ -111,6 +111,13 @@ fi
 
 case "$layer" in
     webui)
+        # The UI is a ROS node too: it looks up map->base_footprint and reads
+        # /map. Under Gazebo those are stamped with /clock, so on the wall
+        # clock the lookup never resolves and the UI sits on "no robot
+        # position" forever with a perfectly good map on screen.
+        # PICAR_PROFILE is already exported; server.py reads it and sets
+        # use_sim_time itself. Passing --ros-args here does not work: it has
+        # its own argparse and rejects arguments it does not know.
         exec python3 /ws/etc/webui/server.py
         ;;
     map|amcl)

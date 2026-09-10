@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import logging
 import os
 import shutil
 import signal
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import xmlrpc.client
 
 import rclpy
 import numpy as np
@@ -47,6 +49,7 @@ from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
@@ -77,7 +80,18 @@ class RobotLink(Node):
     """ROS side: map in, pose in, cmd_vel out, cartographer services."""
 
     def __init__(self):
-        super().__init__("picar_webui")
+        # The UI is a ROS node too: it looks up map->base_footprint and reads
+        # /map. Under Gazebo both are stamped with /clock, and on the wall
+        # clock the lookup never resolves — the UI sits on "no robot position"
+        # forever with a perfectly good map on screen. Set from the profile
+        # rather than a command-line argument, because this script has its own
+        # argparse and rejects --ros-args.
+        sim = os.environ.get("PICAR_PROFILE", "robot") == "sim"
+        super().__init__(
+            "picar_webui",
+            parameter_overrides=[
+                Parameter("use_sim_time", Parameter.Type.BOOL, True)
+            ] if sim else [])
 
         map_qos = QoSProfile(
             depth=1,
@@ -1027,6 +1041,80 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+
+class Supervisor:
+    """The supervisord running as PID 1 in this container.
+
+    The navigation layers used to be children of this process, so restarting
+    the web UI to pick up a change tore down AMCL and Nav2 with it and cost a
+    re-localization every time. They are supervisord programs now; this is the
+    handle on them.
+
+    Every call is wrapped: supervisord is in the same container and should
+    always be there, but a UI that raises 500 because a status poll lost a
+    socket is worse than one that reports a layer as stopped.
+    """
+
+    SOCKET = os.environ.get("SUPERVISOR_SOCKET", "unix:///tmp/supervisor.sock")
+
+    def __init__(self):
+        self._rpc = None
+        self._lock = threading.Lock()
+
+    def _server(self):
+        if self._rpc is None:
+            from supervisor.xmlrpc import SupervisorTransport
+            self._rpc = xmlrpc.client.ServerProxy(
+                "http://127.0.0.1",
+                transport=SupervisorTransport(None, None, self.SOCKET))
+        return self._rpc
+
+    def available(self) -> bool:
+        try:
+            with self._lock:
+                self._server().supervisor.getSupervisorVersion()
+            return True
+        except Exception:                                    # noqa: BLE001
+            return False
+
+    def info(self, program: str) -> dict | None:
+        try:
+            with self._lock:
+                return self._server().supervisor.getProcessInfo(program)
+        except Exception:                                    # noqa: BLE001
+            return None
+
+    def start(self, program: str) -> tuple[bool, str]:
+        try:
+            with self._lock:
+                # wait=False: a ros2 launch tree takes tens of seconds to be
+                # useful and supervisord's own startsecs only proves it did not
+                # die immediately. Readiness is decided by _wait_until against
+                # the actual topics, which is the only honest test.
+                self._server().supervisor.startProcess(program, False)
+            return True, ""
+        except xmlrpc.client.Fault as e:
+            # Already running is not an error to the caller: the layer is up,
+            # which is what was asked for.
+            if e.faultString.startswith("ALREADY_STARTED"):
+                return True, ""
+            return False, e.faultString
+        except Exception as e:                               # noqa: BLE001
+            return False, repr(e)
+
+    def stop(self, program: str) -> tuple[bool, str]:
+        try:
+            with self._lock:
+                self._server().supervisor.stopProcess(program, True)
+            return True, ""
+        except xmlrpc.client.Fault as e:
+            if e.faultString.startswith("NOT_RUNNING"):
+                return True, ""
+            return False, e.faultString
+        except Exception as e:                               # noqa: BLE001
+            return False, repr(e)
+
+
 class ModeStack:
     """Starts and stops the cartographer → nav2 → explore chain."""
 
@@ -1034,17 +1122,35 @@ class ModeStack:
     # explore → nav2 → amcl → cartographer, consumers before what they read.
     # cartographer and amcl are peers — both publish /map and broadcast
     # map→odom, so they must never run at the same time.
-    LAYERS = ("cartographer", "amcl", "nav2", "explore")
+    # "map" rather than "cartographer": the layer runs whichever SLAM backend
+    # is selected, and calling it cartographer while slam_toolbox is in it
+    # would be a lie the UI then repeats.
+    LAYERS = ("map", "amcl", "nav2", "explore")
+
+    # Layer -> supervisord program. cartographer and slam_toolbox share one
+    # program because they are alternatives, never peers.
+    PROGRAM = {"map": "map", "amcl": "amcl", "nav2": "nav", "explore": "explore"}
+
+    # Layer -> what run-layer.sh should launch. The map layer's entry is chosen
+    # at start time from slam_backend.
+    SLAM_LAUNCH = {"cartographer": "cartographer.launch.py",
+                   "slam_toolbox": "slam.launch.py"}
     # Under the workspace, not /tmp. The service runs `docker run --rm`, and
     # /tmp is inside the container, so a layer log written there dies with the
     # container — which is exactly when it is wanted. Only /dev and the
     # workspace are bind-mounted, so the workspace is the one place a log
     # outlives the run that produced it. Falls back to /tmp off the robot,
     # where PICAR_WS is not set.
-    LOG_DIR = os.path.join(os.environ.get("PICAR_WS", "/tmp"), "logs", "webui")
+    # supervisord owns the layer logs now and writes them here; the UI reads
+    # the same files it always did, so /api/logs is unchanged.
+    LOG_DIR = os.path.join(os.environ.get("PICAR_WS", "/tmp"), "logs")
+    RUN_DIR = os.path.join(os.environ.get("PICAR_WS", "/tmp"), "run")
 
     def __init__(self):
-        self._procs: dict[str, subprocess.Popen] = {}
+        self.sup = Supervisor()
+        # cartographer | slam_toolbox. Both are the "map" layer; which one runs
+        # is a choice, so it belongs in state rather than in the launch call.
+        self.slam_backend = "cartographer"
         self._lock = threading.Lock()
         # Transitions are serialised, and each carries a generation so a
         # superseded one unwinds instead of racing the new one. A plain
@@ -1060,6 +1166,68 @@ class ModeStack:
         self.ws = None              # set by build_app; needed to load waypoints
         self.phase = "idle"
         os.makedirs(self.LOG_DIR, exist_ok=True)
+        os.makedirs(self.RUN_DIR, exist_ok=True)
+
+    def adopt(self):
+        """Work out the current mode from what supervisord is already running.
+
+        The layers outlive this process now, which is the point — but it means
+        a restarted UI must not assume it starts from idle. Without this it
+        reports "idle" over a live AMCL and Nav2, and the first thing the user
+        does is start a mode that tears down the stack they were using.
+
+        Called once at startup, before anything can change underneath it.
+        """
+        if not self.sup.available():
+            return                       # not under supervisord; nothing to adopt
+        mapping = self.running("map")
+        localizing = self.running("amcl")
+        if mapping and localizing:
+            # Both publish /map and map->odom. Whichever is newer is what the
+            # user last asked for; stop the other rather than leave two.
+            keep = "amcl" if self._started_at("amcl") >= self._started_at("map") else "map"
+            drop = "map" if keep == "amcl" else "amcl"
+            self._stop(drop)
+            mapping, localizing = keep == "map", keep == "amcl"
+
+        if mapping:
+            self.mode = "mapping"
+            self.slam_backend = self._backend_from_args()
+            self.phase = "mapping (adopted)"
+        elif localizing:
+            self.mode = "localize"
+            self.map_name = self._map_name_from_args()
+            self.phase = "localized (adopted)"
+        else:
+            return
+        logging.info("adopted running stack: mode=%s map=%s backend=%s",
+                     self.mode, self.map_name, self.slam_backend)
+
+    def _started_at(self, name: str) -> int:
+        i = self.sup.info(self.PROGRAM[name])
+        return int(i.get("start", 0)) if i else 0
+
+    def _read_args(self, name: str) -> str:
+        try:
+            with open(self._args_path(name)) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def _backend_from_args(self) -> str:
+        launch = self._read_args("map").split(" ")[0] if self._read_args("map") else ""
+        for backend, f in self.SLAM_LAUNCH.items():
+            if f == launch:
+                return backend
+        return self.slam_backend
+
+    def _map_name_from_args(self):
+        """Recover which map AMCL was given, so the UI can name it."""
+        for tok in self._read_args("amcl").split():
+            if tok.startswith("map_yaml:="):
+                base = os.path.basename(tok.split(":=", 1)[1])
+                return base[:-5] if base.endswith(".yaml") else base
+        return None
 
     # ── transition generations ───────────────────────────────────────────
     def _begin(self) -> int:
@@ -1078,51 +1246,62 @@ class ModeStack:
         with self._gen_lock:
             return gen == self._gen
 
+    # supervisord's stdout_logfile per program. nav's is nav2.log because that
+    # is the name the logs endpoint and every past debugging session use.
+    LOG_FILE = {"map": "map.log", "amcl": "amcl.log",
+                "nav2": "nav2.log", "explore": "explore.log"}
+
     def log_path(self, name: str) -> str:
-        return os.path.join(self.LOG_DIR, f"{name}.log")
+        return os.path.join(self.LOG_DIR, self.LOG_FILE.get(name, f"{name}.log"))
 
-    def _rotate(self, path: str):
-        """Keep the previous run's log as .prev.
+    def _args_path(self, name: str) -> str:
+        return os.path.join(self.RUN_DIR, f"{self.PROGRAM[name]}.args")
 
-        A layer is relaunched on every mode switch, so overwriting in place
-        means the log of the run you want to look at is destroyed by whatever
-        you did next — usually restarting to see what went wrong.
+    def _write_args(self, name: str, launch_file: str,
+                    args: dict[str, str] | None = None):
+        """Hand run-layer.sh the launch file and its arguments.
+
+        supervisord programs have fixed commands, but the map layer picks a
+        backend and amcl needs whichever map is loaded, so the varying part
+        lives in a file the program reads at start. Written before the start
+        call, never after: the program reads it once, immediately.
         """
-        try:
-            if os.path.exists(path):
-                os.replace(path, path + ".prev")
-        except OSError:
-            pass
+        line = " ".join([launch_file] + [f"{k}:={v}" for k, v in (args or {}).items()])
+        os.makedirs(self.RUN_DIR, exist_ok=True)
+        tmp = self._args_path(name) + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(line + "\n")
+        os.replace(tmp, self._args_path(name))               # atomic
 
     def _launch(self, name: str, launch_file: str,
                 args: dict[str, str] | None = None):
-        # Output goes to a file, never DEVNULL: a launch that dies on startup
-        # is the most likely failure here, and discarding stderr makes it
-        # invisible from the phone.
-        # Overwriting a live handle would orphan its process group beyond
-        # any hope of killing it, so never launch over one.
         if self.running(name):
             self._stop(name)
-        cmd = ["ros2", "launch", "picar2_bringup", launch_file]
-        cmd += [f"{k}:={v}" for k, v in (args or {}).items()]
-        self._rotate(self.log_path(name))
-        log = open(self.log_path(name), "wb")
-        log.write(f"$ {' '.join(cmd)}\n".encode())
-        log.flush()
-        self._procs[name] = subprocess.Popen(
-            cmd,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,   # so we can kill the whole launch tree
-        )
+        self._write_args(name, launch_file, args)
+        ok, why = self.sup.start(self.PROGRAM[name])
+        if not ok:
+            # Recorded rather than raised: the caller's next _wait_until will
+            # time out with a phase the user can read, which beats a traceback
+            # on the phone.
+            self.phase = f"could not start {name}: {why}"
 
     def running(self, name: str) -> bool:
-        p = self._procs.get(name)
-        return p is not None and p.poll() is None
+        i = self.sup.info(self.PROGRAM[name])
+        return bool(i) and i.get("statename") in ("RUNNING", "STARTING")
 
     def exit_code(self, name: str):
-        p = self._procs.get(name)
-        return None if p is None else p.poll()
+        """None while running or never started, else the exit status.
+
+        supervisord reports exitstatus 0 for a program that has not run, so
+        STOPPED-without-having-run must not read as a clean exit — detail()
+        turns that into "failed" and the UI would show a layer that died.
+        """
+        i = self.sup.info(self.PROGRAM[name])
+        if not i or i.get("statename") in ("RUNNING", "STARTING"):
+            return None
+        if i.get("statename") == "STOPPED" and not i.get("start"):
+            return None                                      # never started
+        return i.get("exitstatus")
 
     def log_tail(self, name: str, lines: int = 40) -> str:
         try:
@@ -1228,9 +1407,9 @@ class ModeStack:
         self.phase = "switching to localize"
         # amcl is in the set because "Change map" re-enters here while AMCL
         # is already up. Without it the second launch overwrites the handle
-        # in _procs, the first process group becomes unkillable, and two
+        # over a running one, the first process group becomes unkillable and two
         # map_server/amcl sets broadcast map→odom at once.
-        self._teardown({"explore", "nav2", "cartographer", "amcl"})
+        self._teardown({"explore", "nav2", "map", "amcl"})
         if not self._current(gen):
             return
         link.forget_map()
@@ -1273,7 +1452,7 @@ class ModeStack:
         which fits a rare bad message that a BEST_EFFORT subscriber drops
         and cartographer's RELIABLE one receives.
         """
-        tail = self.log_tail("cartographer", 120)
+        tail = self.log_tail("map", 120)
         return tail.count("Ignored subdivision") >= self.POISON_LINES
 
     def _start_cartographer(self, link: "RobotLink", gen: int) -> bool:
@@ -1284,9 +1463,9 @@ class ModeStack:
         helps, so stop burning the user's time and say so.
         """
         for attempt in range(2):
-            if not self.running("cartographer"):
+            if not self.running("map"):
                 with self._lock:
-                    self._launch("cartographer", "cartographer.launch.py")
+                    self._launch("map", self.SLAM_LAUNCH[self.slam_backend])
 
             deadline = time.monotonic() + 45.0
             self.phase = ("waiting for the map" if attempt == 0
@@ -1302,7 +1481,7 @@ class ModeStack:
 
             if attempt == 0:
                 with self._lock:
-                    self._stop("cartographer")
+                    self._stop("map")
                 link.forget_map()
 
         if self._current(gen):
@@ -1341,12 +1520,12 @@ class ModeStack:
         mapping that simply is not progressing. Restarting clears the
         stored timestamp.
         """
-        tail = self.log_tail("cartographer", 200)
+        tail = self.log_tail("map", 200)
         if "Ignored subdivision" in tail:
             # Restarting cartographer does not clear this — the bad scan
             # comes from the lidar driver, which lives in bringup.
             return "lidar timestamps are bad — restart bringup on the robot"
-        if not self.running("cartographer"):
+        if not self.running("map"):
             return "cartographer exited — see its log"
         return "cartographer published no map"
 
@@ -1538,17 +1717,14 @@ class ModeStack:
                 self.map_name = None
 
     def _stop(self, name: str):
-        p = self._procs.pop(name, None)
-        if p is None or p.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(p.pid), signal.SIGINT)
-            p.wait(timeout=10)
-        except Exception:
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-            except Exception:
-                pass
+        """Blocks until the program is down.
+
+        supervisord signals the whole process group and escalates to SIGKILL
+        after stopwaitsecs, which is what killing a ros2 launch tree needs —
+        signalling the launch process alone leaves its nodes orphaned and
+        still publishing, and two map sources at once is not merely untidy.
+        """
+        self.sup.stop(self.PROGRAM[name])
 
 
 def save_map(ws: str, name: str) -> tuple[bool, str]:
@@ -1747,6 +1923,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "map_name": modes.map_name,
             "localized": modes.mode == "localize" and pose is not None,
             "modes": modes.status(),
+            "slam_backend": modes.slam_backend,
             "detail": modes.detail(),
             "phase": modes.phase,
             "explore_status": link.explore_status,
@@ -1936,6 +2113,24 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             return jsonify({"ok": False, "error": err}), 409
         return jsonify({"ok": True}), 202
 
+    @app.route("/api/slam", methods=["POST"])
+    def set_slam():
+        """Choose the SLAM backend for the next mapping session.
+
+        Refused while mapping: switching backends under a live map would mean
+        tearing down the thing that is holding the pose graph, and a half-built
+        map is not something to lose to a stray tap.
+        """
+        backend = (body().get("backend") or "").strip()
+        if backend not in ModeStack.SLAM_LAUNCH:
+            return jsonify({"ok": False,
+                            "error": f"unknown backend {backend!r}"}), 400
+        if modes.mode == "mapping":
+            return jsonify({"ok": False,
+                            "error": "stop mapping before switching backend"}), 409
+        modes.slam_backend = backend
+        return jsonify({"ok": True, "slam_backend": backend})
+
     @app.route("/api/speed", methods=["POST"])
     def set_speed():
         if not modes.running("nav2"):
@@ -1993,7 +2188,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             return jsonify({"ok": False, "error": "bad map name"}), 400
         if modes.mode != "mapping":
             return jsonify({"ok": False, "error": "only while mapping"}), 409
-        if not modes.running("cartographer") or not link.has_map():
+        if not modes.running("map") or not link.has_map():
             # finish_trajectory would block until its 120 s timeout, which
             # surfaces as a raw 500 the client cannot parse.
             return jsonify({"ok": False,
@@ -2018,7 +2213,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/logs")
     def logs():
-        layer = request.args.get("layer", "cartographer")
+        layer = request.args.get("layer", "map")
         if layer not in ModeStack.LAYERS:
             return ("unknown layer", 400)
         return Response(modes.log_tail(layer, 60), mimetype="text/plain")
@@ -2097,6 +2292,9 @@ def main() -> int:
     rclpy.init()
     link = RobotLink()
     modes = ModeStack()
+    # Before the first request: the layers outlive this process, so find out
+    # what is already running rather than reporting idle over a live stack.
+    modes.adopt()
 
     spin = threading.Thread(target=rclpy.spin, args=(link,), daemon=True)
     spin.start()

@@ -20,6 +20,7 @@ let mapData = null;        // {w, h, res, ox, oy, img}
 // cannot show — a false obstacle looks like empty floor there.
 let obstacles = null;
 let showObstacles = true;
+let slamBackend = 'cartographer';   // cartographer | slam_toolbox
 let obstacleCell = 0.05;   // costmap resolution, replaced by the response
 let mapSeq = -1;
 let pose = null;
@@ -308,6 +309,7 @@ async function poll() {
     // back to the old value between the tap and the server's reply.
     if (!speedBusy) maxSpeed = s.max_speed;
     if (s.speed_range) speedRange = s.speed_range;
+    if (s.slam_backend) slamBackend = s.slam_backend;
     if (s.drive_limits) driveLimits = s.drive_limits;
     renderSpeed();
     route = s.route || route;
@@ -377,7 +379,7 @@ function setLive(ok) {
 
 function renderChips() {
   const chips = [
-    ['map', modes.cartographer],
+    ['map', modes.map],
     ['amcl', modes.amcl],
     ['nav', modes.nav2],
     ['explore', modes.explore],
@@ -412,7 +414,7 @@ function renderControls() {
   $('save').classList.toggle('hidden', !mapping);
   $('setpose').classList.toggle('hidden', !loc);
   $('setpose').classList.toggle('armed', armed === 'pose');
-  // Goals work while mapping too — cartographer supplies the pose, so the
+  // Goals work while mapping too — SLAM supplies the pose, so the
   // only precondition is having one.
   $('goto').classList.toggle('hidden', mode === 'idle');
   $('goto').classList.toggle('armed', armed === 'goal');
@@ -483,7 +485,7 @@ function setMode(m, map) {
   armed = null; drag = null;
   if (m === 'mapping') {
     hint.classList.remove('hidden');
-    hint.textContent = 'Starting cartographer — the stick works as soon as the map appears.';
+    hint.textContent = `Starting ${slamBackend === 'slam_toolbox' ? 'slam_toolbox' : 'cartographer'} — the stick works as soon as the map appears.`;
   }
   return post('/api/mode', map ? { mode: m, map } : { mode: m });
 }
@@ -605,10 +607,30 @@ async function stepSpeed(delta) {
 $('settings').onclick = () => {
   $('settingserr').textContent = '';
   $('showobs').checked = showObstacles;
+  renderSlam();
   renderSpeed();
   $('settingssheet').classList.remove('hidden');
 };
 $('cancel-settings').onclick = () => $('settingssheet').classList.add('hidden');
+
+function renderSlam() {
+  document.querySelectorAll('#slampill .seg').forEach((b) => {
+    b.classList.toggle('on', b.dataset.slam === slamBackend);
+    // Switching under a live map would tear down what holds the pose graph.
+    b.disabled = mode === 'mapping';
+  });
+  $('slamnote').textContent = mode === 'mapping'
+    ? 'Stop mapping to switch backend.'
+    : 'Used the next time you start Mapping.';
+}
+
+document.querySelectorAll('#slampill .seg').forEach((b) => {
+  b.onclick = async () => {
+    const r = await (await post('/api/slam', { backend: b.dataset.slam })).json();
+    if (r.ok) { slamBackend = r.slam_backend; renderSlam(); }
+    else $('settingserr').textContent = r.error || 'could not switch backend';
+  };
+});
 
 $('showobs').onclick = (e) => {
   showObstacles = e.target.checked;
