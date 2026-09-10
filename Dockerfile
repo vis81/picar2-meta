@@ -62,3 +62,16 @@ RUN apt-get update \
             ros-jazzy-rviz-imu-plugin; \
     fi \
  && rm -rf /var/lib/apt/lists/*
+
+# Process supervisor. Its own layer, and last, so adding it does not invalidate
+# the ROS install above — that layer takes tens of minutes to rebuild under
+# QEMU, this one takes seconds.
+#
+# supervisord is PID 1 in the running container and owns every process: the
+# bringup stack, the web UI, and the navigation layers the UI starts on demand.
+# Before this they were children of the web UI, so restarting the UI to pick up
+# a code change tore down AMCL and Nav2 with it and cost a re-localization
+# every time.
+RUN apt-get update \
+ && apt-get install -y supervisor \
+ && rm -rf /var/lib/apt/lists/*
