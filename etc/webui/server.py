@@ -440,10 +440,24 @@ class RobotLink(Node):
 
     # ── speed ────────────────────────────────────────────────────────────
     SPEED_PARAM = "FollowPath.desired_linear_vel"
-    # Above roughly this, cmd_vel_relay's max_angular_vel (1.2 rad/s) starts
-    # clipping the turn rate a Reeds-Shepp path asks for on the planner's
-    # 0.5 m minimum radius, and the robot under-steers off its own plan.
-    SPEED_MAX = 0.6
+    # A ceiling on what the UI will let someone ask for, not a limit the robot
+    # is known to hit. It was 0.6 on the theory that cmd_vel_relay's 1.2 rad/s
+    # clamp would start clipping the turn rate a Reeds-Shepp path wants on the
+    # planner's 0.5 m minimum radius. The geometry is real — the tightest turn
+    # the relay permits is v / 1.2, so 0.50 m at 0.6 m/s and 0.83 m at 1.0 —
+    # but sampling /cmd_vel through a three-lap run at 0.7 m/s showed the route
+    # never asks: angular sat at 0.22 rad/s median, 0.78 at p95, and 0.9% of
+    # commands exceeded the clamp, all of those at ~0.14 m/s. So the clamp
+    # binds on tight manoeuvres at a crawl, not on corners taken at speed.
+    #
+    # What that means for anything above ~0.6: the risk is a course with
+    # genuinely tight corners, where the planner asks for a radius the
+    # drivetrain will not give and the car under-steers off its own plan. The
+    # way to check is to count |angular| > 1.2 in /cmd_vel, not to infer it
+    # from lap times. Measured in sim on the office route, 0.7 m/s was 28.3 s
+    # a lap against 32.0 at 0.6, with no missed waypoints — faster, and the
+    # cost was accuracy (mean approach 0.043 -> 0.060 m), not safety.
+    SPEED_MAX = 1.0
     SPEED_MIN = 0.1
 
     def _call(self, client, req, timeout=3.0):
