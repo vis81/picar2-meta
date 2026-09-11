@@ -154,7 +154,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-route-gen bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap stack-setup stack-sim-setup stack-status stack-logs softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
@@ -352,12 +352,65 @@ bench-explore:
 #   stop  one NavigateToPose per waypoint, Nav2's goal checker deciding arrival
 #   make bench-route SCENARIO=route_square ROUTE_MODE=flow RUNS=3
 ROUTE_MODE ?= flow
+
+# Route scenarios are ordinary checked-in scenarios, selected with SCENARIO:
+#
+#   make bench-route SCENARIO=route_block          # one box, four corners
+#   make bench-route SCENARIO=f1_route             # the office, from its map
+#   make bench-route SCENARIO=f1_route OVERLAY=speed_060 ROUTE_MODE=stop
+#
+# f1_route was generated from maps/F1 by bench-route-gen and then committed. It
+# is a fixed artifact, not rebuilt per run: a scenario that regenerated itself
+# would silently change what a number means, and the whole point of these is
+# that today's lap time is comparable with one measured weeks ago on the floor.
+# Regenerate deliberately, when the map itself changes, and commit the result.
 bench-route:
 	$(CMD) "$(BENCH_SETUP) && for i in \$$(seq 1 $(RUNS)); do \
 	  echo \"--- $(SCENARIO) [route/$(ROUTE_MODE)] run \$$i/$(RUNS)\" && \
 	  ros2 run picar2_benchmark bench-route $(_SCENARIO_YML) \
-	    --route-mode $(ROUTE_MODE) --sensor-noise $(NOISE) \
+	    --route-mode $(ROUTE_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) \
 	    -o $(BENCH_OUT); done"
+
+# Turn a saved map into a route scenario, once. Writes into the package's
+# scenarios/ so the result is committed alongside the hand-written ones — after
+# which `make build` installs it and SCENARIO=<map>_route runs it like any other.
+#
+#   make bench-route-gen BENCH_MAP=F1 BENCH_START=-1.811,-1.333,1.278 \
+#        BENCH_ROUTE_NAME=f1_route
+#
+# Reads maps/<name>.yaml and maps/<name>.waypoints.yaml, the pair the web UI
+# writes when you save a map and its route, so any place the robot has driven
+# can become a benchmark.
+#
+# BENCH_START is the pose the robot really started from, as X,Y,YAW. Pass it
+# when the scenario will be compared against a measured run: the default sits
+# 0.8 m behind waypoint 0, which is a different lap.
+# BENCH_ROUTE_NAME names the scenario. Defaults to <map>_route; set it to
+# refresh an existing scenario in place rather than adding a twin under a
+# different name — f1_route was generated from map F1, which would otherwise
+# come back as F1_route and leave two scenarios claiming to be the same place.
+BENCH_MAP        ?=
+BENCH_LAPS       ?= 3
+BENCH_START      ?=
+BENCH_ROUTE_NAME ?= $(BENCH_MAP)_route
+BENCH_GEN        ?= $(WS)/src/picar2-ros2/picar2_benchmark/scenarios
+_MAP_YML    := $(WS_PATH)/maps/$(BENCH_MAP).yaml
+_MAP_WPS    := $(WS_PATH)/maps/$(BENCH_MAP).waypoints.yaml
+_ROUTE_NAME := $(BENCH_ROUTE_NAME)
+_START_ARG  := $(if $(BENCH_START),--start=$(BENCH_START),)
+
+bench-route-gen:
+	@test -n "$(BENCH_MAP)" || { echo "bench-route-gen needs BENCH_MAP=<map name>"; exit 2; }
+	@test -f "$(_MAP_YML)" || { echo "no such map: $(_MAP_YML)"; exit 2; }
+	@test -f "$(_MAP_WPS)" || { echo "no waypoints for $(BENCH_MAP): $(_MAP_WPS)"; \
+	  echo "save a route for this map in the web UI first"; exit 2; }
+	$(CMD) "$(BENCH_SETUP) && ros2 run picar2_benchmark bench-from-map $(_MAP_YML) \
+	  --waypoints $(_MAP_WPS) --name $(_ROUTE_NAME) --laps $(BENCH_LAPS) \
+	  $(_START_ARG) -o $(BENCH_GEN)"
+	@echo
+	@echo "committed artifact: $(BENCH_GEN)/$(_ROUTE_NAME).yaml"
+	@echo "now: make build && git -C src/picar2-ros2 add -A && git -C src/picar2-ros2 commit"
+	@echo "then: make bench-route SCENARIO=$(_ROUTE_NAME)"
 
 # Leave the stack up afterwards so RViz/Gazebo can be attached.
 bench-keep:
