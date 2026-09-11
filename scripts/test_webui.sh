@@ -104,7 +104,12 @@ waitfor() {
 
 # docker, wherever it lives. Empty CONTAINER means the container-level checks
 # were not available and their callers skip.
-dock() { if [ -n "$SSH" ]; then ssh -o ConnectTimeout=8 "$SSH" docker "$@"
+# BatchMode so an unknown host key or a missing agent fails instead of sitting
+# at a prompt: pointing this at a robot that is off should say so, not hang.
+# The banner prints before any of this runs, so a slow probe is visible.
+dock() { if [ -n "$SSH" ]; then
+             ssh -o ConnectTimeout=6 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+                 "$SSH" docker "$@"
          else docker "$@"; fi; }
 
 # Runs a ros2 command inside the container, on the same DDS domain the stack
@@ -125,6 +130,20 @@ sup() { dock exec "$CONTAINER" supervisorctl -c /ws/etc/supervisord.conf "$@" 2>
 suppid() { sup status "$1" | awk '{print $4}' | tr -d ,; }
 
 want() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *,"$1",*) return 0;; esac; return 1; }
+
+# Some sections need a stack state the modes section normally leaves behind.
+# With --only they can be reached cold, and a missing prerequisite is not a
+# failure of the thing under test — it means the check never ran.
+need_nav2() {
+    [ "$(st 'd["modes"]["nav2"]')" = "True" ] && return 0
+    skip "$1" "nav2 is not running — run without --only, or start a mode first"
+    return 1
+}
+need_mapping() {
+    [ "$(st 'd["mode"]')" = "mapping" ] && return 0
+    skip "$1" "not in mapping mode — run without --only, or start mapping first"
+    return 1
+}
 section() { printf '\n  \033[1m=== %s ===\033[0m\n' "$1"; }
 
 # One /map publisher, always: cartographer and AMCL both publish it and both
@@ -174,6 +193,10 @@ fi
 PROFILE=$(st 'd.get("profile","")')
 [ -n "$PROFILE" ] || PROFILE=unknown
 
+printf '  target : %s:%s\n' "$HOST" "$PORT"
+printf '  profile: %s\n' "$PROFILE"
+[ -n "$SSH" ] && printf '  ssh    : %s\n' "$SSH"
+
 # Find the container unless told. Names come from etc/picar.service and
 # etc/picar-sim.service; profile order matters so a machine running both is
 # not tested through the wrong one.
@@ -194,8 +217,6 @@ elif ! dock exec "$CONTAINER" true 2>/dev/null; then
     CONTAINER=""
 fi
 
-printf '  target : %s:%s\n' "$HOST" "$PORT"
-printf '  profile: %s\n' "$PROFILE"
 printf '  docker : %s\n' \
        "$([ -n "$CONTAINER" ] && echo "$CONTAINER${SSH:+ via $SSH}" || echo 'unavailable — container checks will skip')"
 printf '  motion : %s\n' "$([ $ALLOW_MOTION = 1 ] && echo allowed || echo blocked)"
@@ -230,6 +251,7 @@ fi
 # ── speed ────────────────────────────────────────────────────────────────────
 if want speed; then
 section "speed"
+if ! need_nav2 "speed checks"; then :; else
 chk "change while navigation is up" "$(post speed '{"value":0.5}' | jok)" "True"
 chk "value took"                    "$(st 'd["max_speed"]')" "0.5"
 chk "joystick limit follows"        "$(st 'round(d["drive_limits"][0],2)')" "0.5"
@@ -240,6 +262,7 @@ chk "too fast refused"              "$(post speed '{"value":1.5}' | jok)" "False
 chk "too slow refused"              "$(post speed '{"value":0.05}' | jok)" "False"
 chk "non-numeric refused"           "$(post speed '{"value":"fast"}' | jok)" "False"
 post speed '{"value":0.4}' >/dev/null
+fi
 fi
 
 # ── SLAM backend ─────────────────────────────────────────────────────────────
@@ -267,6 +290,7 @@ fi
 # ── costmap overlay ──────────────────────────────────────────────────────────
 if want costmap; then
 section "costmap overlay"
+if ! need_nav2 "costmap checks"; then :; else
 hdr=$(curl -s -m 10 -D- -o /tmp/.uitest_cm "$API/costmap" | tr -d '\r')
 chk "costmap 200"        "$(echo "$hdr" | grep -c '200 OK')" "1"
 chk "X-Cell header"      "$(echo "$hdr" | grep -ci 'x-cell')" "1"
@@ -274,6 +298,7 @@ sz=$(wc -c < /tmp/.uitest_cm 2>/dev/null || echo 1)
 [ $((sz % 8)) -eq 0 ] && ok "float32 xy pairs ($sz bytes)" \
                       || bad "float32 xy pairs" "$sz not a multiple of 8"
 rm -f /tmp/.uitest_cm
+fi
 fi
 
 # ── waypoints ────────────────────────────────────────────────────────────────
@@ -293,12 +318,14 @@ fi
 # ── save ─────────────────────────────────────────────────────────────────────
 if want save; then
 section "save map"
+if ! need_mapping "save checks"; then :; else
 chk "empty name refused"   "$(post mapping/save '{"name":""}' | jok)" "False"
 chk "slash refused"        "$(post mapping/save '{"name":"a/b"}' | jok)" "False"
 chk "dotfile refused"      "$(post mapping/save '{"name":".hidden"}' | jok)" "False"
 chk "save succeeds"        "$(post mapping/save "{\"name\":\"$TEST_MAP\"}" 150 | jok)" "True"
 chk "appears in the list"  "$(st "'$TEST_MAP' in [m['name'] for m in d['maps']]")" "True"
 chk "grid + pbstream"      "$(st "[m['has_grid'] and m['has_pbstream'] for m in d['maps'] if m['name']=='$TEST_MAP'][0]")" "True"
+fi
 fi
 
 # ── localize ─────────────────────────────────────────────────────────────────
