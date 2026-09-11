@@ -435,7 +435,16 @@ chk "unknown layer refused" \
 fi
 
 # ── teardown ─────────────────────────────────────────────────────────────────
+# Idle first, and *wait* for it. /api/mode returns 202 and tears the layers down
+# on a worker, so deleting the map immediately leaves AMCL running against a
+# file that is about to vanish — and run/amcl.args still naming it. A later
+# restart then adopts a map that no longer exists and every attempt to localize
+# dies with "amcl failed to start". Observed on the robot, not hypothetical.
 post mode '{"mode":"idle"}' >/dev/null 2>&1
+for _ in $(seq 1 20); do
+    [ "$(st 'd["modes"]["amcl"] or d["modes"]["map"]')" = "False" ] && break
+    sleep 1
+done
 if [ $KEEP = 0 ] && want save; then
     ws=$(curl -s -m 8 "$API/debug" | python3 -c "
 import sys,json
@@ -443,6 +452,14 @@ try: print(json.load(sys.stdin).get('ws',''))
 except Exception: print('')" 2>/dev/null)
     [ -n "$ws" ] && rm -f "$ws/maps/$TEST_MAP".* 2>/dev/null
     rm -f "$(dirname "$0")/../maps/$TEST_MAP".* 2>/dev/null
+    # The args file is what adoption reads to rebuild state, so it has to go
+    # with the map. Removing it is safe: every layer start rewrites it.
+    if [ -n "$SSH" ]; then
+        ssh -o ConnectTimeout=6 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$SSH" "rm -f '$ws/run/amcl.args'" >/dev/null 2>&1 || true
+    else
+        rm -f "$ws/run/amcl.args" 2>/dev/null || true
+    fi
 fi
 
 printf '\n  \033[1m%d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"

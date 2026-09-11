@@ -1205,6 +1205,20 @@ class ModeStack:
         elif localizing:
             self.mode = "localize"
             self.map_name = self._map_name_from_args()
+            # The map can be gone: args/ outlives maps/, and deleting a map
+            # leaves AMCL's recorded name pointing at nothing. Adopting it
+            # anyway makes the UI offer a mode whose every restart dies with
+            # "amcl failed to start" and a log about an out-of-size map. Seen
+            # on the robot after the UI test suite removed its own test map.
+            if self.map_name and self.ws and not os.path.exists(
+                    os.path.join(self.ws, "maps", f"{self.map_name}.yaml")):
+                logging.warning("adopted amcl names a map that no longer "
+                                "exists (%s) — stopping it", self.map_name)
+                self._stop("amcl")
+                self.map_name = None
+                self.mode = "idle"
+                self.phase = "idle"
+                return
             # _to_localize loads these when a person picks the mode; adoption
             # has to as well, or a restarted UI shows an empty route over a
             # map whose waypoints are sitting on disk. They belong to the map,
@@ -1348,19 +1362,39 @@ class ModeStack:
         i = self.sup.info(self.PROGRAM[name])
         return bool(i) and i.get("statename") in ("RUNNING", "STARTING")
 
-    def exit_code(self, name: str):
-        """None while running or never started, else the exit status.
+    # What each supervisord state means for "did this layer fail?":
+    #
+    #   RUNNING / STARTING  alive
+    #   STOPPED             stopped by request — including every normal mode
+    #                       change, which stops layers on the way to the next
+    #                       mode. exitstatus is stale here: supervisord leaves
+    #                       -1 after the SIGTERM. Never a failure.
+    #   EXITED              exited on its own; exitstatus decides
+    #   FATAL / BACKOFF     could not be started at all; spawnerr says why
+    #
+    # Reading exitstatus without the state is what put a permanent "amcl failed
+    # to start" on an idle robot: switching to idle stops amcl, exitstatus is
+    # -1, and the UI called that a crash.
+    FAILED_STATES = ("FATAL", "BACKOFF")
 
-        supervisord reports exitstatus 0 for a program that has not run, so
-        STOPPED-without-having-run must not read as a clean exit — detail()
-        turns that into "failed" and the UI would show a layer that died.
-        """
+    def exit_code(self, name: str):
+        """None unless the layer actually exited on its own, else its status."""
         i = self.sup.info(self.PROGRAM[name])
-        if not i or i.get("statename") in ("RUNNING", "STARTING"):
+        if not i or i.get("statename") in ("RUNNING", "STARTING", "STOPPED"):
             return None
-        if i.get("statename") == "STOPPED" and not i.get("start"):
-            return None                                      # never started
         return i.get("exitstatus")
+
+    def failure(self, name: str):
+        """Why the layer failed, or None. A deliberate stop is not a failure."""
+        i = self.sup.info(self.PROGRAM[name])
+        if not i:
+            return None
+        state = i.get("statename")
+        if state in self.FAILED_STATES:
+            return i.get("spawnerr") or f"{state.lower()}: could not start"
+        if state == "EXITED" and i.get("exitstatus"):
+            return f"exited with status {i.get('exitstatus')}"
+        return None
 
     def log_tail(self, name: str, lines: int = 40) -> str:
         try:
@@ -1376,11 +1410,12 @@ class ModeStack:
         """Per-layer state including why a layer stopped, for the UI."""
         out = {}
         for name in self.LAYERS:
-            code = self.exit_code(name)
+            why = self.failure(name)
             out[name] = {
                 "running": self.running(name),
-                "exit": code,
-                "failed": code is not None and code != 0,
+                "exit": self.exit_code(name),
+                "failed": why is not None,
+                "why": why,
             }
         return out
 
