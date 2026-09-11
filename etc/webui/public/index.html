@@ -16,6 +16,7 @@
   <span id="state">connecting…</span>
   <span class="spacer"></span>
   <span id="chips"></span>
+  <span id="batt" class="batt hidden"></span>
   <button id="settings" class="iconbtn" aria-label="Settings">⚙</button>
 </header>
 
@@ -101,6 +102,10 @@
     <label class="rowline"><input id="showobs" type="checkbox" checked><span>Show
       what the robot senses — cells the lidar and ToF are marking as blocked,
       which the saved map cannot show</span></label>
+    <label class="rowline"><input id="showplan" type="checkbox"><span>Show the
+      planned path — the route Nav2 intends to drive, redrawn each time it
+      replans. Read it against the sensed cells above to see what it is
+      steering around.</span></label>
     <div class="sheet-buttons">
       <button id="cancel-settings" class="btn">Close</button>
     </div>

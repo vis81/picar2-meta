@@ -56,7 +56,14 @@ default_args() {
                 # itself. Override the world through /ws/run/bringup.args.
                 echo "sim.launch.py headless:=${PICAR_HEADLESS:-false}"
             else
-                echo "picar2.launch.py lidar:=${PICAR_LIDAR:-ld19} use_joy:=${PICAR_USE_JOY:-false}"
+                # Vizanti and Foxglove default off: both are web UIs this one
+                # replaced, and together they cost ~12% of the Pi (vizanti is
+                # five nodes, tf_consolidator alone 3.5%). Set PICAR_USE_VIZANTI
+                # or PICAR_USE_FOXGLOVE to true when you actually want them.
+                echo "picar2.launch.py lidar:=${PICAR_LIDAR:-ld19}" \
+                     "use_joy:=${PICAR_USE_JOY:-false}" \
+                     "use_vizanti:=${PICAR_USE_VIZANTI:-false}" \
+                     "use_foxglove:=${PICAR_USE_FOXGLOVE:-false}"
             fi ;;
         nav)     echo "nav2.launch.py" ;;
         explore) echo "explore.launch.py" ;;

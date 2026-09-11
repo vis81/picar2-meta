@@ -28,12 +28,30 @@ html, body {
   background: linear-gradient(180deg, rgba(17,20,26,.95), rgba(17,20,26,0));
   font-size: 13px;
 }
-.spacer { flex: 1; }
+.spacer { flex: 1 1 auto; min-width: 0; }
+
+/* The bar is one non-wrapping row and the settings button is the last thing
+   in it, so anything that refuses to shrink pushes the button off the screen
+   entirely — which is what the battery pill did on a phone. Everything that
+   can give ground is allowed to; the button and the battery are not. */
+#bar { flex-wrap: nowrap; }
+#state {
+  flex: 0 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#chips { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+#batt, #settings { flex: 0 0 auto; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.live { background: var(--ok); }
 .dot.dead { background: var(--danger); }
 
 #chips { display: flex; gap: 5px; }
+/* Narrow phones: the layer chips are the least important thing up here —
+   they duplicate what the mode buttons already say — so they go first
+   rather than squeezing the battery or the settings button. */
+@media (max-width: 430px) {
+  #chips { display: none; }
+}
 .iconbtn {
   flex: none; width: 32px; height: 32px; margin-left: 6px;
   border: 1px solid var(--line); border-radius: 10px;
@@ -186,3 +204,18 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 /* .sheet p is the heading's subtitle and carries a 16px bottom margin;
    this one trails a control and should sit close to it. */
 .note { margin: 6px 0 0 !important; color: var(--muted); font-size: 12px; }
+
+/* Battery, in the top bar next to the layer chips. Tabular figures so the
+   width does not jitter as the number changes, and a colour that only shifts
+   when it matters — a percentage that is always coloured is decoration. */
+.batt {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: #9aa4b2;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #2a3240;
+  white-space: nowrap;
+}
+.batt.warn { color: #ffcc66; border-color: #5a4a22; }
+.batt.crit { color: #ff7b7b; border-color: #6b2b2b; }

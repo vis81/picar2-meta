@@ -46,7 +46,8 @@ from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import SetInitialPose
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Path as NavPath
+from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -54,7 +55,8 @@ from rclpy.node import Node
 # SetParameters service, and an unaliased import here shadows it — which
 # broke set_max_speed with a TypeError from deep inside rclpy.
 from rclpy.parameter import Parameter as RclpyParameter
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                       ReliabilityPolicy)
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 from waitress import serve
@@ -106,8 +108,11 @@ class RobotLink(Node):
         # explore_lite searches the global costmap, not /map — and unlike
         # cartographer's output it uses the standard scale (0 free, 100
         # occupied), so it is also the only one worth thresholding.
-        self.create_subscription(OccupancyGrid, "/global_costmap/costmap",
-                                 self._on_costmap, map_qos)
+        # Kept only until Nav2 is ready, then dropped — see _on_costmap. The
+        # handle and the QoS are stored so forget_nav() can put it back.
+        self._costmap_qos = map_qos
+        self._costmap_sub = self.create_subscription(
+            OccupancyGrid, "/global_costmap/costmap", self._on_costmap, map_qos)
         self._costmap_free = 0
         # The local costmap is what the robot believes is in its way right
         # now — the lidar and ToF returns after marking and inflation. Worth
@@ -116,6 +121,22 @@ class RobotLink(Node):
         self.create_subscription(OccupancyGrid, "/local_costmap/costmap",
                                  self._on_local_costmap, map_qos)
         self._local: OccupancyGrid | None = None
+
+        # The path Nav2 is actually following. /plan is the global plan as
+        # published each replan; it is already in the map frame, so unlike the
+        # costmap it needs no transform. Worth showing next to the obstacles:
+        # together they answer "why is it going that way" without a laptop.
+        self.create_subscription(NavPath, "/plan", self._on_plan, 5)
+        self._plan: NavPath | None = None
+
+        # Latched by the publisher at 1 Hz, so a late subscriber still gets
+        # the last reading rather than waiting a second for the next one.
+        self.create_subscription(
+            BatteryState, "/battery", self._on_battery,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST))
+        self._battery = None
 
         self._cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         # explore_lite stops permanently the first time it finds no frontiers.
@@ -199,6 +220,7 @@ class RobotLink(Node):
         self._route_seq = 0
         self._route_handle = None
         self._route_retries = 0
+        self._route_retry_at = 0.0
         self._route_sent_idx = None     # index the live window starts at
         self._route_min_d = None        # closest approach so far, current wp
         self.create_subscription(
@@ -290,8 +312,23 @@ class RobotLink(Node):
         self.pose_error = "no lookup yet"
 
     def _on_costmap(self, msg: OccupancyGrid):
-        cells = np.frombuffer(bytes(msg.data), dtype=np.int8)
+        """Count free cells, once, to decide Nav2 has actually come up.
+
+        Then unsubscribe. The global costmap is 260x235 cells — 61 kB that
+        rclpy deserializes into Python at 1 Hz, and measured on the robot the
+        executor thread doing it was 38% of a core, the single largest
+        consumer on the Pi. Nothing reads the number after the readiness gate
+        passes; costmap_ready() is a threshold, not a live value. forget_nav()
+        resets the count and resubscribes, so a restarted Nav2 is still
+        waited for properly.
+        """
+        cells = np.frombuffer(memoryview(msg.data), dtype=np.int8)
         self._costmap_free = int(np.count_nonzero((cells >= 0) & (cells <= 25)))
+        if self._costmap_sub is not None and self.costmap_ready():
+            self.destroy_subscription(self._costmap_sub)
+            self._costmap_sub = None
+            logging.info("global costmap is up (%d free cells) — unsubscribing",
+                         self._costmap_free)
 
     def costmap_free(self) -> int:
         return self._costmap_free
@@ -300,9 +337,54 @@ class RobotLink(Node):
         with self._lock:
             self._local = msg
 
+    def _on_battery(self, msg: BatteryState):
+        with self._lock:
+            self._battery = (msg.voltage, msg.percentage,
+                             self.get_clock().now().nanoseconds * 1e-9)
+
+    def battery(self):
+        """(volts, percent) or None. Stale readings are dropped: a number
+        frozen at the moment the link died is worse than no number."""
+        with self._lock:
+            b = self._battery
+        if b is None:
+            return None
+        v, pct, t = b
+        if self.get_clock().now().nanoseconds * 1e-9 - t > 15.0:
+            return None
+        return {"volts": round(float(v), 2),
+                "percent": None if pct != pct else round(float(pct) * 100)}
+
+    def _on_plan(self, msg: NavPath):
+        with self._lock:
+            self._plan = msg
+
+    def plan_points(self) -> tuple[bytes | None, str]:
+        """The current global plan as map-frame float32 xy pairs."""
+        with self._lock:
+            msg = self._plan
+        if msg is None:
+            return None, "no plan published yet"
+        frame = (msg.header.frame_id or "map").lstrip("/")
+        if frame != "map":
+            return None, f"plan is in {frame!r}, not map"
+        # A stale plan is worse than none: it draws a route the robot is no
+        # longer following, which is exactly the thing this is meant to
+        # settle. Nav2 replans at 1 Hz, so a few seconds means it stopped.
+        age = self.get_clock().now().nanoseconds * 1e-9 - (
+            msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        if age > self.PLAN_STALE_S:
+            return b"", ""
+        pts = np.array([[ps.pose.position.x, ps.pose.position.y]
+                        for ps in msg.poses], dtype=np.float32)
+        return pts.tobytes(), ""
+
     def local_cell_size(self) -> float:
         with self._lock:
             return self._local.info.resolution if self._local else 0.05
+
+    # Older than this and the plan is not what the robot is doing any more.
+    PLAN_STALE_S = 5.0
 
     # Lethal and inscribed. Inflation below this is derived from these cells
     # rather than sensed, so drawing it would triple the point count to say
@@ -630,6 +712,13 @@ class RobotLink(Node):
                 "distance": self.nav_distance}
 
     def forget_nav(self):
+        # Nav2 is going away, so the readiness gate has to be re-armed: zero
+        # the count and listen again until the next one proves itself.
+        self._costmap_free = 0
+        if self._costmap_sub is None:
+            self._costmap_sub = self.create_subscription(
+                OccupancyGrid, "/global_costmap/costmap", self._on_costmap,
+                self._costmap_qos)
         self.max_speed = None
         self.route_stop()
         self.cancel_goal()
@@ -694,6 +783,7 @@ class RobotLink(Node):
         self._route_min_d = None
         self._route_sent_idx = None
         self._route_retries = 0
+        self._route_retry_at = 0.0
         # A route and a single goal both drive; never let them overlap.
         self.cancel_goal()
         if self.route_flow:
@@ -783,7 +873,28 @@ class RobotLink(Node):
     # would tick waypoints off on the spot.
     RECEDE_M = 0.08
     # Consecutive aborts on the same waypoint before the route gives up.
-    ROUTE_ABORT_RETRIES = 2
+    ROUTE_ABORT_RETRIES = 6
+    # Wait this long before re-sending after an abort, growing with each
+    # consecutive failure: 2, 4, 6, 8, 10, 12 s — 42 s of patience in total.
+    #
+    # Sized from what the failures actually are. Re-sending the window is
+    # already a full replan: it is a fresh NavigateThroughPoses goal, the
+    # behaviour tree restarts and the planner runs again. So the retry does
+    # not need a different mechanism, it needs to outlast the blockage. The
+    # ones measured on the F1 route cleared on their own in tens of seconds —
+    # a manual goal sent minutes later drove straight through a spot the
+    # route had given up on after 8 s.
+    #
+    # Retrying instantly is what made a transient abort terminal. Measured on
+    # the robot: the planner refused with "Start occupied", and 22 ms later we
+    # sent a new goal, which preempted the behaviour tree and restarted it from
+    # scratch — three planner failures inside 104 ms, then the route gave up.
+    # Nav2's own recovery needs seconds (Wait is 5 s, BackUp about 2), and the
+    # marked cell that caused it clears on its own within about a second once
+    # the sensors see through it. Neither can happen while we are hammering the
+    # action server, and both are cheap to wait for: the same corridor was
+    # driven cleanly 24 times out of 25 in the run this came from.
+    ROUTE_RETRY_BACKOFF_S = 2.0
     # RemovePassedGoals in the through-poses BT must trim inside
     # CAPTURE_RADIUS_M. If it trimmed later, the planner would stop routing
     # through a waypoint the robot had not yet come close enough to count,
@@ -896,7 +1007,14 @@ class RobotLink(Node):
         # so these are consecutive failures, not a lifetime budget.
         if self._route_retries < self.ROUTE_ABORT_RETRIES:
             self._route_retries += 1
-            self._route_send_window()
+            # Scheduled, not sent: the drive tick picks this up. Sending from
+            # here would put the new goal in within milliseconds of the abort,
+            # which is the behaviour this backoff exists to stop.
+            delay = self.ROUTE_RETRY_BACKOFF_S * self._route_retries
+            self._route_retry_at = time.monotonic() + delay
+            logging.info("route: nav aborted on waypoint %d, retry %d/%d in "
+                         "%.1fs", self.route_idx % n + 1, self._route_retries,
+                         self.ROUTE_ABORT_RETRIES, delay)
             return
         self._route_finish("could not reach waypoint "
                            f"{self.route_idx % n + 1}")
@@ -936,6 +1054,7 @@ class RobotLink(Node):
         self.route_passed += 1
         self._route_min_d = None
         self._route_retries = 0
+        self._route_retry_at = 0.0   # superseded: we moved on
         n = len(self._route_poses)
         if self.route_loop:
             self.route_idx = (self.route_idx + 1) % n
@@ -1062,6 +1181,17 @@ class RobotLink(Node):
             self._cmd_pub.publish(Twist())
             self._drive_was_active = False
 
+        # A deferred retry after an aborted goal. Fired here because this is
+        # the one timer the route has; doing it in the action callback would
+        # mean sleeping in it.
+        if self.route_active and self._route_retry_at:
+            if time.monotonic() >= self._route_retry_at:
+                self._route_retry_at = 0.0
+                try:
+                    self._route_send_window()
+                except Exception:
+                    logging.exception("route: deferred retry failed")
+
         # A flow route advances on the robot's position rather than on an
         # action result, so it needs a clock. This is the only timer.
         if self.route_active and self.route_flow:
@@ -1094,6 +1224,8 @@ class Supervisor:
     def __init__(self):
         self._rpc = None
         self._lock = threading.Lock()
+        self._info_cache: dict | None = None
+        self._info_at = 0.0
 
     def _server(self):
         if self._rpc is None:
@@ -1111,12 +1243,28 @@ class Supervisor:
         except Exception:                                    # noqa: BLE001
             return False
 
-    def info(self, program: str) -> dict | None:
+    # /api/status asks for every layer's state twice a second, and detail(),
+    # running() and nav_ready() each ask again — a dozen XML-RPC round trips
+    # over the unix socket per poll, for state that changes on the scale of
+    # seconds. One cached sweep instead. Short enough that a layer dying is
+    # still noticed within a poll.
+    INFO_TTL_S = 0.4
+
+    def _all_info(self) -> dict:
+        now = time.monotonic()
+        if now - self._info_at < self.INFO_TTL_S and self._info_cache is not None:
+            return self._info_cache
         try:
             with self._lock:
-                return self._server().supervisor.getProcessInfo(program)
+                rows = self._server().supervisor.getAllProcessInfo()
+            self._info_cache = {r["name"]: r for r in rows}
         except Exception:                                    # noqa: BLE001
-            return None
+            self._info_cache = {}
+        self._info_at = now
+        return self._info_cache
+
+    def info(self, program: str) -> dict | None:
+        return self._all_info().get(program)
 
     def start(self, program: str) -> tuple[bool, str]:
         try:
@@ -2067,6 +2215,9 @@ def load_waypoints(ws: str, map_name: str) -> list[dict]:
     return out
 
 
+_maps_cache: tuple[float, float, list[dict]] | None = None   # (mtime, at, result)
+
+
 def list_maps(ws: str) -> list[dict]:
     """Every saved map, by base name.
 
@@ -2079,6 +2230,20 @@ def list_maps(ws: str) -> list[dict]:
     maps = os.path.join(ws, "maps")
     if not os.path.isdir(maps):
         return []
+
+    # Re-listed on every /api/status, twice a second, for a directory that
+    # changes when someone saves a map. Keyed on the directory mtime so a new
+    # map still appears at once, with a short floor so the stat itself is not
+    # the cost. os.listdir plus two exists() per entry is not free on a Pi.
+    global _maps_cache
+    try:
+        mt = os.stat(maps).st_mtime
+    except OSError:
+        mt = 0.0
+    now = time.monotonic()
+    if (_maps_cache is not None and _maps_cache[0] == mt
+            and now - _maps_cache[1] < 5.0):
+        return _maps_cache[2]
 
     found: dict[str, dict] = {}
     names = sorted(os.listdir(maps))
@@ -2113,6 +2278,7 @@ def list_maps(ws: str) -> list[dict]:
             "has_grid": "grid" in which,
             "has_pbstream": "pbstream" in which,
         })
+    _maps_cache = (mt, now, out)
     return out
 
 
@@ -2176,6 +2342,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "map_name": modes.map_name,
             "localized": modes.mode == "localize" and pose is not None,
             "modes": modes.status(),
+            "battery": link.battery(),
             "slam_backend": modes.slam_backend,
             # robot | sim. The UI does not branch on it, but anything talking
             # to this API should be able to tell what it is talking to without
@@ -2228,6 +2395,17 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         resp.headers["X-Map-Resolution"] = str(info.resolution)
         resp.headers["X-Map-Origin-X"] = str(info.origin.position.x)
         resp.headers["X-Map-Origin-Y"] = str(info.origin.position.y)
+        return resp
+
+    @app.route("/api/plan")
+    def get_plan():
+        """The global plan, as raw float32 map-frame xy — same shape as
+        /api/costmap so the client decodes both the same way."""
+        pts, why = link.plan_points()
+        if pts is None:
+            return (why, 404)
+        resp = Response(pts, mimetype="application/octet-stream")
+        resp.headers["X-Count"] = str(len(pts) // 8)
         return resp
 
     @app.route("/api/costmap")

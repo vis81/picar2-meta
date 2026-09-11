@@ -22,6 +22,10 @@ let obstacles = null;
 // Per-device, so it belongs in this browser rather than on the robot: two
 // people looking at the same robot can reasonably want different overlays.
 let showObstacles = localStorage.getItem('showObstacles') !== '0';
+// Off by default: the plan is a debugging view, and on a small screen it
+// competes with the route the person actually drew.
+let showPlan = localStorage.getItem('showPlan') === '1';
+let plan = null;
 let slamBackend = 'cartographer';   // cartographer | slam_toolbox
 let obstacleCell = 0.05;   // costmap resolution, replaced by the response
 let mapSeq = -1;
@@ -119,6 +123,49 @@ async function fetchObstacles() {
   }
 }
 
+function renderBattery(b) {
+  const el = $('batt');
+  // Hidden rather than showing a dash: the reading goes stale when the link
+  // to the STM32 drops, and a stale number is worse than an absent one.
+  if (!b || b.volts == null) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.textContent = b.percent == null
+    ? `${b.volts.toFixed(2)} V`
+    : `${b.percent}% · ${b.volts.toFixed(2)} V`;
+  el.classList.toggle('warn', b.percent != null && b.percent <= 30 && b.percent > 15);
+  el.classList.toggle('crit', b.percent != null && b.percent <= 15);
+}
+
+async function fetchPlan() {
+  if (!showPlan) { plan = null; return; }
+  try {
+    const r = await fetch('/api/plan');
+    if (!r.ok) { plan = null; return; }
+    plan = new Float32Array(await r.arrayBuffer());
+  } catch (e) {
+    plan = null;
+  }
+}
+
+function drawPlan() {
+  if (!plan || plan.length < 4 || !mapData) return;
+  // Above the obstacles, below the robot and the route: it is the thing being
+  // explained by one and explaining the other.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(120, 210, 255, 0.95)';
+  ctx.lineWidth = 2 / view.scale;      // constant on screen at any zoom
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < plan.length; i += 2) {
+    const gx = (plan[i] - mapData.ox) / mapData.res;
+    const gy = mapData.h - (plan[i + 1] - mapData.oy) / mapData.res;
+    if (i === 0) ctx.moveTo(gx, gy); else ctx.lineTo(gx, gy);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawObstacles() {
   if (!obstacles || !obstacles.length || !mapData) return;
   // One cell, in grid units. Drawn as squares rather than dots so the cell
@@ -146,6 +193,7 @@ function draw() {
     // Under the robot and the route: those are what you are steering, and
     // the obstacles are context for them.
     drawObstacles();
+    drawPlan();
 
     if (pose) {
       // map metres → grid cells → canvas (already inside the view transform)
@@ -307,10 +355,12 @@ async function poll() {
     // reason about, and an obstacle overlay older than the pose it sits
     // under would be worse than none.
     fetchObstacles();
+    fetchPlan();
     // Not while a step is in flight, or the poll would snap the display
     // back to the old value between the tap and the server's reply.
     if (!speedBusy) maxSpeed = s.max_speed;
     if (s.speed_range) speedRange = s.speed_range;
+    renderBattery(s.battery);
     if (s.slam_backend) slamBackend = s.slam_backend;
     if (s.drive_limits) driveLimits = s.drive_limits;
     renderSpeed();
@@ -611,6 +661,7 @@ async function stepSpeed(delta) {
 $('settings').onclick = () => {
   $('settingserr').textContent = '';
   $('showobs').checked = showObstacles;
+  $('showplan').checked = showPlan;
   renderSlam();
   renderSpeed();
   $('settingssheet').classList.remove('hidden');
@@ -641,6 +692,12 @@ $('showobs').onclick = (e) => {
   try { localStorage.setItem('showObstacles', showObstacles ? '1' : '0'); }
   catch (_) {}                            // private mode: still works, just forgets
   if (!showObstacles) obstacles = null;   // clear immediately, not next poll
+};
+
+$('showplan').onclick = (e) => {
+  showPlan = e.target.checked;
+  try { localStorage.setItem('showPlan', showPlan ? '1' : '0'); } catch (_) {}
+  if (!showPlan) plan = null;
 };
 
 $('speeddown').onclick = () => stepSpeed(-SPEED_STEP);
