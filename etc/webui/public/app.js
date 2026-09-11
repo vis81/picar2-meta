@@ -19,7 +19,9 @@ let mapData = null;        // {w, h, res, ox, oy, img}
 // What the robot currently believes is in its way, which the static map
 // cannot show — a false obstacle looks like empty floor there.
 let obstacles = null;
-let showObstacles = true;
+// Per-device, so it belongs in this browser rather than on the robot: two
+// people looking at the same robot can reasonably want different overlays.
+let showObstacles = localStorage.getItem('showObstacles') !== '0';
 let slamBackend = 'cartographer';   // cartographer | slam_toolbox
 let obstacleCell = 0.05;   // costmap resolution, replaced by the response
 let mapSeq = -1;
@@ -585,6 +587,8 @@ function renderSpeed() {
 }
 
 async function stepSpeed(delta) {
+  // maxSpeed is null only before the first status arrives; it no longer waits
+  // on Nav2, because the speed can be set with the robot idle.
   if (maxSpeed == null || speedBusy) return;
   const [lo, hi] = speedRange;
   const want = Math.min(hi, Math.max(lo, Math.round((maxSpeed + delta) * 100) / 100));
@@ -634,6 +638,8 @@ document.querySelectorAll('#slampill .seg').forEach((b) => {
 
 $('showobs').onclick = (e) => {
   showObstacles = e.target.checked;
+  try { localStorage.setItem('showObstacles', showObstacles ? '1' : '0'); }
+  catch (_) {}                            // private mode: still works, just forgets
   if (!showObstacles) obstacles = null;   // clear immediately, not next poll
 };
 

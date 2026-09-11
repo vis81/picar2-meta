@@ -23,6 +23,7 @@ Env vars are used if flags aren't given:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import logging
 import os
@@ -145,6 +146,15 @@ class RobotLink(Node):
             GetParameters, "/controller_server/get_parameters")
         self._speed_set = self.create_client(
             SetParameters, "/controller_server/set_parameters")
+        # Two different things, deliberately:
+        #   want_speed  what the user chose. Survives Nav2 going away, because
+        #               it also bounds the joystick and is what the settings
+        #               sheet displays.
+        #   max_speed   what Nav2 last confirmed. A cache, cleared with the
+        #               rest of the nav state in forget_nav().
+        # Collapsing them is what made the sheet show "-" after any mode
+        # change: the setting vanished with the cache.
+        self.want_speed = None
         self.max_speed = None
         self._goal_handle = None
         # Each goal carries a sequence number so late callbacks from a
@@ -508,6 +518,7 @@ class RobotLink(Node):
             reason = (res.results[0].reason if res.results else "") or "refused"
             return False, reason
         self.max_speed = round(v, 3)
+        self.want_speed = self.max_speed
         return True, ""
 
     # ── navigation goals ─────────────────────────────────────────────────
@@ -1021,7 +1032,8 @@ class RobotLink(Node):
     # ── drive ────────────────────────────────────────────────────────────
     def drive_limits(self) -> tuple[float, float]:
         """What the joystick is allowed to command right now."""
-        lin = self.max_speed if self.max_speed is not None else MAX_LINEAR
+        lin = self.want_speed if self.want_speed is not None else (
+            self.max_speed if self.max_speed is not None else MAX_LINEAR)
         return lin, min(RELAY_MAX_ANGULAR, lin / MIN_TURN_RADIUS_M)
 
     def set_drive(self, linear: float, angular: float):
@@ -1172,6 +1184,11 @@ class ModeStack:
         self.sup = Supervisor()
         # cartographer | slam_toolbox. Both are the "map" layer; which one runs
         # is a choice, so it belongs in state rather than in the launch call.
+        # The last speed a person chose, kept here rather than on the link
+        # because it has to outlive every Nav2 the link ever talks to: Nav2
+        # starts from nav2.yaml's desired_linear_vel each time, so the choice
+        # is reapplied on the way up rather than read back from it.
+        self.want_speed = None
         self.slam_backend = "cartographer"
         self._lock = threading.Lock()
         # Transitions are serialised, and each carries a generation so a
@@ -1189,6 +1206,15 @@ class ModeStack:
         self.phase = "idle"
         os.makedirs(self.LOG_DIR, exist_ok=True)
         os.makedirs(self.RUN_DIR, exist_ok=True)
+        saved = load_settings()
+        if saved.get("slam_backend") in self.SLAM_LAUNCH:
+            self.slam_backend = saved["slam_backend"]
+        speed = saved.get("max_speed")
+        if isinstance(speed, (int, float)):
+            self.want_speed = float(speed)
+        if saved:
+            logging.info("restored settings: backend=%s speed=%s",
+                         self.slam_backend, self.want_speed)
 
     def adopt(self, link: "RobotLink" = None):
         """Work out the current mode from what supervisord is already running.
@@ -1670,7 +1696,42 @@ class ModeStack:
             if self._current(gen):
                 self.phase = "nav2 global costmap never appeared"
             return False
+        self.apply_speed(link)
         return True
+
+    def apply_speed(self, link: "RobotLink"):
+        """Push the remembered top speed into a Nav2 that has just started.
+
+        Every Nav2 comes up on nav2.yaml's desired_linear_vel, so a speed the
+        user set stays set only if it is reapplied here — otherwise it silently
+        reverts to 0.40 on the next mode change, which looks like the setting
+        was never saved. Reported, not raised: a robot that drives at the
+        default is better than a mode that refuses to finish coming up.
+        """
+        if self.want_speed is None:
+            link.refresh_max_speed()
+            return
+        # Retry, because "Nav2 is up" is not one moment. costmap_ready waits on
+        # the *global* costmap, which belongs to planner_server, while
+        # FollowPath.desired_linear_vel is declared by controller_server as it
+        # configures its plugin. Ask too early and the parameter service
+        # answers "cannot be set because it was not declared" — seen on the
+        # robot — and the saved speed would be quietly dropped on every fresh
+        # Nav2 while the settings file still claimed it.
+        deadline = time.monotonic() + 30.0
+        err = "no attempt made"
+        while time.monotonic() < deadline:
+            ok, err = link.set_max_speed(self.want_speed)
+            if ok:
+                logging.info("applied saved top speed %.2f m/s",
+                             self.want_speed)
+                return
+            time.sleep(2.0)
+        logging.warning("could not apply saved top speed %.2f: %s",
+                        self.want_speed, err)
+        # The seeded value would otherwise keep claiming a speed Nav2 is
+        # not running at, including to the joystick.
+        link.refresh_max_speed()
 
     def start_explore(self, link: "RobotLink"):
         """Worker: bring Nav2 up if needed, then start exploring."""
@@ -1921,6 +1982,40 @@ def save_map(ws: str, name: str, backend: str = "cartographer") -> tuple[bool, s
     return True, base
 
 
+SETTINGS_NAME = "settings.json"
+
+
+def settings_path() -> str:
+    """Beside the layer args, for the same reason: it is state the running
+    system owns, it has to outlive the container, and the workspace itself is
+    a git checkout that must not be dirtied by the robot writing to it."""
+    return os.path.join(ModeStack.RUN_DIR, SETTINGS_NAME)
+
+
+def load_settings() -> dict:
+    try:
+        with open(settings_path()) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}          # absent or corrupt: defaults, never a failed start
+
+
+def save_settings(values: dict) -> None:
+    """Merge and write atomically. Never raises: losing a preference is not
+    worth failing the request that changed it."""
+    try:
+        current = load_settings()
+        current.update(values)
+        os.makedirs(ModeStack.RUN_DIR, exist_ok=True)
+        tmp = settings_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(current, f, indent=2, sort_keys=True)
+        os.replace(tmp, settings_path())
+    except OSError as e:
+        logging.warning("could not save settings: %s", e)
+
+
 def waypoints_path(ws: str, map_name: str) -> str:
     return os.path.join(ws, "maps", f"{map_name}.waypoints.yaml")
 
@@ -2024,6 +2119,11 @@ def list_maps(ws: str) -> list[dict]:
 def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     app = Flask(__name__, static_folder=None)
     modes.ws = ws
+    # Manual driving does not need Nav2, so the saved top speed has to reach
+    # drive_limits() without waiting for one. Seeded optimistically here and
+    # corrected by apply_speed() if Nav2 ever refuses it.
+    if modes.want_speed is not None:
+        link.want_speed = modes.want_speed
 
     def persist():
         """Waypoints belong to a map, so they are only saveable once one is
@@ -2096,7 +2196,14 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "nav": link.nav_status(),
             "nav_ready": modes.nav_ready(link),
             "route": link.route_status(),
-            "max_speed": link.max_speed,
+            # Whatever the robot would actually drive at, by the same
+            # precedence drive_limits() uses: the setting, else what Nav2
+            # last confirmed, else the built-in default. Never null — the
+            # settings sheet has to have a number to show and to step from,
+            # and "-" with dead +/- buttons is what reporting the cache gave.
+            "max_speed": (link.want_speed if link.want_speed is not None
+                          else link.max_speed if link.max_speed is not None
+                          else MAX_LINEAR),
             "drive_limits": list(link.drive_limits()),
             "speed_range": [link.SPEED_MIN, link.SPEED_MAX],
             "maps": list_maps(ws),
@@ -2292,21 +2399,45 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             return jsonify({"ok": False,
                             "error": "stop mapping before switching backend"}), 409
         modes.slam_backend = backend
+        save_settings({"slam_backend": backend})
         return jsonify({"ok": True, "slam_backend": backend})
 
     @app.route("/api/speed", methods=["POST"])
     def set_speed():
-        if not modes.running("nav2"):
-            return jsonify({"ok": False,
-                            "error": "navigation isn't running"}), 409
+        """Set the one top speed, whether or not Nav2 is running.
+
+        It is a setting, not a command to a node: it bounds the joystick too,
+        and manual driving needs no Nav2 at all. Refusing it while Nav2 is
+        down also made the natural order of things impossible — pick a speed,
+        then start driving — and left the only way to change it behind a mode
+        the user might be about to leave.
+
+        With Nav2 up it goes straight to the controller. With Nav2 down it is
+        saved and applied by apply_speed() on the way up, which is the same
+        path a restored setting takes.
+        """
         try:
-            value = body()["value"]
-        except (KeyError, TypeError):
+            value = float(body()["value"])
+        except (KeyError, TypeError, ValueError):
             return jsonify({"ok": False, "error": "need a value"}), 400
-        ok, err = link.set_max_speed(value)
-        if not ok:
-            return jsonify({"ok": False, "error": err}), 409
-        return jsonify({"ok": True, "max_speed": link.max_speed})
+        if not (link.SPEED_MIN <= value <= link.SPEED_MAX):
+            return jsonify({"ok": False,
+                            "error": f"pick a speed between {link.SPEED_MIN:.2f} "
+                                     f"and {link.SPEED_MAX:.2f} m/s"}), 409
+        value = round(value, 3)
+        if modes.running("nav2"):
+            ok, err = link.set_max_speed(value)
+            if not ok:
+                return jsonify({"ok": False, "error": err}), 409
+            value = link.max_speed
+        else:
+            # Nothing to tell yet; the joystick reads this immediately and
+            # Nav2 gets it when it starts.
+            link.want_speed = value
+        modes.want_speed = value
+        save_settings({"max_speed": value})
+        return jsonify({"ok": True, "max_speed": value,
+                        "applied_to_nav2": modes.running("nav2")})
 
     @app.route("/api/route/stop", methods=["POST"])
     def route_stop():
