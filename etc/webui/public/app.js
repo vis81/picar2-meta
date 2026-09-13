@@ -26,6 +26,8 @@ let showObstacles = localStorage.getItem('showObstacles') !== '0';
 // competes with the route the person actually drew.
 let showPlan = localStorage.getItem('showPlan') === '1';
 let plan = null;
+let showScan = localStorage.getItem('showScan') === '1';
+let scan = null;
 let slamBackend = 'cartographer';   // cartographer | slam_toolbox
 let obstacleCell = 0.05;   // costmap resolution, replaced by the response
 let mapSeq = -1;
@@ -163,6 +165,32 @@ async function fetchPlan() {
   }
 }
 
+async function fetchScan() {
+  if (!showScan) { scan = null; return; }
+  try {
+    const r = await fetch('/api/scan');
+    if (!r.ok) { scan = null; return; }
+    scan = new Float32Array(await r.arrayBuffer());
+  } catch (e) {
+    scan = null;
+  }
+}
+
+function drawScan() {
+  if (!scan || scan.length < 2 || !mapData) return;
+  // Raw returns, above the map and under the costmap cells they produce:
+  // where the two disagree is exactly what this layer is for.
+  ctx.save();
+  ctx.fillStyle = 'rgba(80, 220, 120, 0.9)';
+  const s = 3 / view.scale;                // a 6 px dot, constant on screen
+  for (let i = 0; i < scan.length; i += 2) {
+    const gx = (scan[i] - mapData.ox) / mapData.res;
+    const gy = mapData.h - (scan[i + 1] - mapData.oy) / mapData.res;
+    ctx.fillRect(gx - s, gy - s, 2 * s, 2 * s);
+  }
+  ctx.restore();
+}
+
 function drawPlan() {
   if (!plan || plan.length < 4 || !mapData) return;
   // Above the obstacles, below the robot and the route: it is the thing being
@@ -208,6 +236,7 @@ function draw() {
 
     // Under the robot and the route: those are what you are steering, and
     // the obstacles are context for them.
+    drawScan();
     drawObstacles();
     drawPlan();
 
@@ -372,6 +401,7 @@ async function poll() {
     // under would be worse than none.
     fetchObstacles();
     fetchPlan();
+    fetchScan();
     // Not while a step is in flight, or the poll would snap the display
     // back to the old value between the tap and the server's reply.
     if (!speedBusy) maxSpeed = s.max_speed;
@@ -691,6 +721,7 @@ $('settings').onclick = () => {
   $('settingserr').textContent = '';
   $('showobs').checked = showObstacles;
   $('showplan').checked = showPlan;
+  $('showscan').checked = showScan;
   renderSlam();
   renderSpeed();
   $('settingssheet').classList.remove('hidden');
@@ -727,6 +758,12 @@ $('showplan').onclick = (e) => {
   showPlan = e.target.checked;
   try { localStorage.setItem('showPlan', showPlan ? '1' : '0'); } catch (_) {}
   if (!showPlan) plan = null;
+};
+
+$('showscan').onclick = (e) => {
+  showScan = e.target.checked;
+  try { localStorage.setItem('showScan', showScan ? '1' : '0'); } catch (_) {}
+  if (!showScan) scan = null;
 };
 
 $('speeddown').onclick = () => stepSpeed(-SPEED_STEP);

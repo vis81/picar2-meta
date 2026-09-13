@@ -104,6 +104,9 @@
     <label class="rowline"><input id="showobs" type="checkbox" checked><span>Show
       what the robot senses — cells the lidar and ToF are marking as blocked,
       which the saved map cannot show</span></label>
+    <label class="rowline"><input id="showscan" type="checkbox"><span>Show the
+      raw lidar scan — every return, before the costmap decides what counts.
+      Where the dots and the sensed cells disagree, that is the story.</span></label>
     <label class="rowline"><input id="showplan" type="checkbox"><span>Show the
       planned path — the route Nav2 intends to drive, redrawn each time it
       replans. Read it against the sensed cells above to see what it is

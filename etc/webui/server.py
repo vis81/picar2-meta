@@ -47,7 +47,7 @@ from nav2_msgs.srv import SetInitialPose
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from nav_msgs.msg import OccupancyGrid, Path as NavPath
-from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Bool, String
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -128,6 +128,13 @@ class RobotLink(Node):
         # together they answer "why is it going that way" without a laptop.
         self.create_subscription(NavPath, "/plan", self._on_plan, 5)
         self._plan: NavPath | None = None
+        # Raw lidar for the UI overlay. Kept as the last message and only
+        # converted on request: 360 points at 10 Hz is nothing to store and
+        # too much to project when nobody is looking.
+        self.create_subscription(
+            LaserScan, "/lidar_node/scan", self._on_scan,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        self._scan: LaserScan | None = None
 
         # Latched by the publisher at 1 Hz, so a late subscriber still gets
         # the last reading rather than waiting a second for the next one.
@@ -386,6 +393,37 @@ class RobotLink(Node):
             return b"", ""
         pts = np.array([[ps.pose.position.x, ps.pose.position.y]
                         for ps in msg.poses], dtype=np.float32)
+        return pts.tobytes(), ""
+
+    def _on_scan(self, msg: LaserScan):
+        with self._lock:
+            self._scan = msg
+
+    def scan_points(self) -> tuple[bytes | None, str]:
+        """The latest lidar scan as map-frame float32 xy pairs."""
+        with self._lock:
+            msg = self._scan
+        if msg is None:
+            return None, "no scan received yet"
+        age = self.get_clock().now().nanoseconds * 1e-9 - (
+            msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        if age > 2.0:
+            return b"", ""                      # lidar stopped: draw nothing
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                "map", msg.header.frame_id.lstrip("/"), Time())
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+        r = np.asarray(msg.ranges, dtype=np.float32)
+        ok = np.isfinite(r) & (r > msg.range_min) & (r < msg.range_max)
+        a = msg.angle_min + np.arange(len(r), dtype=np.float32) * msg.angle_increment
+        lx, ly = r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])
+        t, q = tf.transform.translation, tf.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        c, sn = math.cos(yaw), math.sin(yaw)
+        pts = np.column_stack([t.x + lx * c - ly * sn,
+                               t.y + lx * sn + ly * c]).astype(np.float32)
         return pts.tobytes(), ""
 
     def local_cell_size(self) -> float:
@@ -2522,6 +2560,16 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         """The global plan, as raw float32 map-frame xy — same shape as
         /api/costmap so the client decodes both the same way."""
         pts, why = link.plan_points()
+        if pts is None:
+            return (why, 404)
+        resp = Response(pts, mimetype="application/octet-stream")
+        resp.headers["X-Count"] = str(len(pts) // 8)
+        return resp
+
+    @app.route("/api/scan")
+    def get_scan():
+        """The latest lidar scan, as raw float32 map-frame xy like /api/plan."""
+        pts, why = link.scan_points()
         if pts is None:
             return (why, 404)
         resp = Response(pts, mimetype="application/octet-stream")
