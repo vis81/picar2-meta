@@ -1004,7 +1004,14 @@ class RobotLink(Node):
                 < self.NEAR_ENOUGH_M)
         if near:
             self._route_retries = 0
+            seq = self._route_seq
             self._route_pass_current()
+            # The goal that carried this window is dead. _route_pass_current
+            # only re-sends every ROUTE_WINDOW - 1 waypoints, which is right
+            # while a goal is running and wrong here: with nothing sent the
+            # route sat "active" on a parked robot.
+            if self.route_active and seq == self._route_seq:
+                self._route_send_window()
             return
 
         # Far from it, so this is not an arrival — but not necessarily a
