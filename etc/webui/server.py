@@ -48,7 +48,7 @@ from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from nav_msgs.msg import OccupancyGrid, Path as NavPath
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from rclpy.action import ActionClient
 from rclpy.node import Node
 # Aliased: rcl_interfaces.msg.Parameter is already imported above for the
@@ -143,6 +143,15 @@ class RobotLink(Node):
         # At startup that happens routinely, before the global costmap has
         # copied the map in — resume puts it back to work.
         self._resume_pub = self.create_publisher(Bool, "/explore/resume", 10)
+        # The route as the UI sees it — waypoints, index, passes — as JSON,
+        # latched, on every change. Exists so a bag records the leg and lap
+        # boundaries the UI counted instead of leaving them to be
+        # reconstructed from poses and a capture radius.
+        self._route_pub = self.create_publisher(
+            String, "/webui/route",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                       history=HistoryPolicy.KEEP_LAST))
         # AMCL takes an initial pose two ways. Prefer the service: it is
         # acknowledged, whereas the topic subscription is volatile, so a
         # message published before discovery finishes is dropped with no
@@ -786,6 +795,7 @@ class RobotLink(Node):
         self._route_retry_at = 0.0
         # A route and a single goal both drive; never let them overlap.
         self.cancel_goal()
+        self._publish_route()
         if self.route_flow:
             self._route_send_window()
         else:
@@ -1053,6 +1063,7 @@ class RobotLink(Node):
         at each — the thing this mode exists to avoid."""
         self.route_passed += 1
         self._route_min_d = None
+        self._publish_route()
         self._route_retries = 0
         self._route_retry_at = 0.0   # superseded: we moved on
         n = len(self._route_poses)
@@ -1109,6 +1120,7 @@ class RobotLink(Node):
         was_flow = self.route_flow
         self.route_active = False
         self.route_error = error
+        self._publish_route()
         if was_flow and self._route_handle is not None:
             # "route complete" included: the window may still hold poses
             # beyond the last one the route cared about.
@@ -1119,6 +1131,7 @@ class RobotLink(Node):
         if not self.route_active:
             return
         self.route_active = False
+        self._publish_route()
         self._cancel_window()
         self.cancel_goal()
 
@@ -1136,6 +1149,11 @@ class RobotLink(Node):
         except Exception:
             pass
         self.nav_state = "canceling"
+
+    def _publish_route(self):
+        st = self.route_status()
+        st["t"] = time.time()
+        self._route_pub.publish(String(data=json.dumps(st)))
 
     def route_status(self) -> dict:
         return {
@@ -2282,6 +2300,97 @@ def list_maps(ws: str) -> list[dict]:
     return out
 
 
+class BagRecorder:
+    """One `ros2 bag record` at a time, into <ws>/bags/<date-time>/.
+
+    Started from the UI so a run driven by hand is as replayable as one the
+    benchmark drives. The topic list is what it takes to replay a lap on
+    paper — what the planner asked for, what the controller sent, what the
+    costmap looked like and where AMCL put the robot — plus the raw sensors,
+    so a stop can be traced back to the scan or ToF frame behind it.
+
+    The recorder is a plain child of this process, not its own session: when
+    supervisord stops the web UI it stops the recorder with it, and rosbag2
+    closes the bag cleanly on SIGTERM as on SIGINT. Under the workspace, not
+    /tmp, for the same reason as the logs — it has to outlive the container.
+    """
+
+    TOPICS = (
+        # Latched (transient-local): rosbag2 matches the publisher's QoS,
+        # so the one message is captured and replays latched. With these
+        # the bag stands alone in RViz — map, robot model, and the TF tree.
+        "/map", "/robot_description",
+        "/cmd_vel", "/plan", "/received_global_plan", "/unsmoothed_plan",
+        "/global_costmap/costmap",
+        "/local_costmap/costmap", "/local_costmap/costmap_updates",
+        "/local_costmap/published_footprint",
+        "/amcl_pose", "/odom", "/tf", "/tf_static", "/imu/data", "/joint_states",
+        "/battery", "/lookahead_point", "/webui/route",
+        "/lidar_node/scan", "/sen0628/pointcloud",
+        # Every node's log lines, time-aligned with the data: the
+        # "collision ahead" sits next to the scan that caused it.
+        "/rosout",
+        "/behavior_tree_log", "/follow_path/_action/status",
+        "/navigate_through_poses/_action/status",
+        "/compute_path_through_poses/_action/status",
+    )
+
+    def __init__(self, ws: str):
+        self.dir = os.path.join(ws, "bags")
+        self._proc: subprocess.Popen | None = None
+        self._log = None
+        self.name: str | None = None
+        self.since: float | None = None
+        self._lock = threading.Lock()
+
+    def active(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def start(self) -> tuple[bool, str]:
+        with self._lock:
+            if self.active():
+                return True, self.name
+            name = time.strftime("%Y%m%d-%H%M%S")
+            out = os.path.join(self.dir, name)
+            try:
+                os.makedirs(self.dir, exist_ok=True)
+                self._log = open(out + ".log", "w")
+                self._proc = subprocess.Popen(
+                    ["ros2", "bag", "record", "-o", out, *self.TOPICS],
+                    stdout=self._log, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL)
+            except OSError as e:
+                return False, str(e)
+            self.name, self.since = name, time.time()
+            return True, name
+
+    def stop(self) -> None:
+        with self._lock:
+            proc = self._proc
+            if proc is None:
+                return
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=20)   # flushing the cache can take a while
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+            if self._log:
+                self._log.close()
+                self._log = None
+            self._proc = None
+
+    def status(self) -> dict:
+        active = self.active()
+        # A recorder that died on its own (bad topic, disk full) is worth
+        # showing as stopped rather than as a phantom recording.
+        if not active and self._proc is not None:
+            self.stop()
+        return {"active": active,
+                "name": self.name if active else None,
+                "since": self.since if active else None}
+
+
 def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     app = Flask(__name__, static_folder=None)
     modes.ws = ws
@@ -2300,8 +2409,11 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
                 save_waypoints(ws, modes.map_name, link.waypoints)
             except OSError:
                 pass
+        link._publish_route()
 
     speed_probe = threading.Event()
+    bag = BagRecorder(ws)
+    modes.bag = bag
 
     def _probe_speed():
         try:
@@ -2343,6 +2455,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "localized": modes.mode == "localize" and pose is not None,
             "modes": modes.status(),
             "battery": link.battery(),
+            "bag": bag.status(),
             "slam_backend": modes.slam_backend,
             # robot | sim. The UI does not branch on it, but anything talking
             # to this API should be able to tell what it is talking to without
@@ -2683,6 +2796,19 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         link.resume_explore()
         return jsonify({"ok": True})
 
+    @app.route("/api/bag", methods=["POST"])
+    def bag_toggle():
+        """{on: true|false}. Recording is independent of the mode: a bag of
+        manual driving in mapping mode is as useful as one of a route."""
+        b = body()
+        if bool(b.get("on", False)):
+            ok, msg = bag.start()
+            if not ok:
+                return jsonify({"ok": False, "error": msg}), 500
+        else:
+            bag.stop()
+        return jsonify({"ok": True, "bag": bag.status()})
+
     @app.route("/api/logs")
     def logs():
         layer = request.args.get("layer", "map")
@@ -2781,12 +2907,18 @@ def main() -> int:
     # After spin because completing an interrupted transition needs a pose,
     # and a pose needs TF being processed.
     modes.adopt(link)
+    # Latched, so a bag started before any route runs still carries the
+    # waypoint list.
+    link._publish_route()
 
     app = build_app(link, modes, args.ws, args.root)
     print(f"picar web UI on http://{args.bind}:{args.port}  (ws={args.ws})")
     try:
         serve(app, host=args.bind, port=args.port, threads=8)
     finally:
+        bag = getattr(modes, "bag", None)
+        if bag is not None:
+            bag.stop()
         modes.stop_all()
         rclpy.shutdown()
     return 0

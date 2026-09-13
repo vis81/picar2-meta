@@ -219,3 +219,16 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 }
 .batt.warn { color: #ffcc66; border-color: #5a4a22; }
 .batt.crit { color: #ff7b7b; border-color: #6b2b2b; }
+
+/* Bag recorder, under the status text. Small and out of the way until it
+   is recording, then red with the elapsed time so a bag left running is
+   noticed rather than found the next day. */
+.bag {
+  position: fixed; left: 14px; z-index: 3;
+  top: calc(max(10px, env(safe-area-inset-top)) + 34px);
+  font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
+  color: #9aa4b2; background: rgba(17,20,26,.7);
+  border: 1px solid #2a3240; border-radius: 999px;
+  padding: 3px 9px; white-space: nowrap;
+}
+.bag.on { color: #fff; background: #b3261e; border-color: #b3261e; }

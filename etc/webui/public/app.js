@@ -123,6 +123,22 @@ async function fetchObstacles() {
   }
 }
 
+let bag = { active: false, name: null, since: null };
+let bagBusy = false;
+function renderBag() {
+  const el = $('bag');
+  if (bagBusy) return;
+  el.classList.toggle('on', bag.active);
+  if (bag.active && bag.since) {
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - bag.since));
+    const mm = String(Math.floor(s / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    el.textContent = `■ ${bag.name} · ${mm}:${ss}`;
+  } else {
+    el.textContent = '● rec';
+  }
+}
+
 function renderBattery(b) {
   const el = $('batt');
   // Hidden rather than showing a dash: the reading goes stale when the link
@@ -361,6 +377,7 @@ async function poll() {
     if (!speedBusy) maxSpeed = s.max_speed;
     if (s.speed_range) speedRange = s.speed_range;
     renderBattery(s.battery);
+    if (s.bag) { bag = s.bag; renderBag(); }
     if (s.slam_backend) slamBackend = s.slam_backend;
     if (s.drive_limits) driveLimits = s.drive_limits;
     renderSpeed();
@@ -564,6 +581,18 @@ $('changemap').onclick = () => openMapPicker();
 
 $('goto').onclick = () => arm(armed === 'goal' ? null : 'goal');
 $('cancelgoal').onclick = () => post('/api/goal/cancel');
+
+$('bag').onclick = async () => {
+  if (bagBusy) return;
+  bagBusy = true;
+  $('bag').textContent = bag.active ? 'stopping…' : 'starting…';
+  try {
+    const r = await (await post('/api/bag', { on: !bag.active })).json();
+    if (r.bag) bag = r.bag;
+  } catch (e) {}
+  bagBusy = false;
+  renderBag();
+};
 $('stopexplore').onclick = () => post('/api/explore', { on: false });
 
 function arm(what) {
