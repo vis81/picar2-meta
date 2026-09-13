@@ -2739,16 +2739,26 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
 
     @app.route("/api/route/stop", methods=["POST"])
     def route_stop():
+        logging.info("route stop from %s (%s)", request.remote_addr,
+                     request.headers.get("User-Agent", "?")[:60])
         link.route_stop()
         return jsonify({"ok": True})
 
     @app.route("/api/goal/cancel", methods=["POST"])
     def goal_cancel():
+        logging.info("goal cancel from %s (%s)", request.remote_addr,
+                     request.headers.get("User-Agent", "?")[:60])
         link.cancel_goal()
         return jsonify({"ok": True})
 
     @app.route("/api/takeover", methods=["POST"])
     def takeover():
+        # Logged with the sender: a route that ends in "Goal canceled" with
+        # nobody admitting to it needs to be traceable to a phone.
+        logging.info("takeover from %s (%s) route_active=%s nav=%s",
+                     request.remote_addr,
+                     request.headers.get("User-Agent", "?")[:60],
+                     link.route_active, link.nav_state)
         # The human has the wheel. Deciding here rather than in the client
         # avoids branching on state that is up to half a second stale —
         # exactly the case where it would fail to cancel.
