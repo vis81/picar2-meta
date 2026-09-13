@@ -154,7 +154,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-route-gen bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-route-gen odom-check bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap stack-setup stack-sim-setup stack-status stack-logs softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
@@ -370,6 +370,16 @@ bench-route:
 	  ros2 run picar2_benchmark bench-route $(_SCENARIO_YML) \
 	    --route-mode $(ROUTE_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) \
 	    -o $(BENCH_OUT); done"
+
+# How good is the odometry, measured against the map. Runs on the PC on a
+# bag the web UI recorded (copy it over first), or live against the robot.
+#
+#   make odom-check BAG=bags/20260913-093420 MAP=maps/F1b.yaml
+#   make odom-check LIVE=60 MAP=maps/F1b.yaml
+ODOM_MAP ?= maps/F1b.yaml
+odom-check:
+	$(CMD) "$(BENCH_SETUP) && ros2 run picar2_benchmark bench-odom \
+	  $(if $(LIVE),--live $(LIVE),$(BAG)) --map $(or $(MAP),$(ODOM_MAP))"
 
 # Turn a saved map into a route scenario, once. Writes into the package's
 # scenarios/ so the result is committed alongside the hand-written ones — after
