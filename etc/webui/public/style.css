@@ -211,14 +211,17 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 .batt {
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-  color: #9aa4b2;
-  padding: 2px 8px;
+  color: var(--text);
+  padding: 3px 9px;
   border-radius: 999px;
-  border: 1px solid #2a3240;
+  /* Opaque: the bar's gradient fades to nothing, and grey text on a bare
+     pill was invisible over the white of the map behind it. */
+  background: #1c2129;
+  border: 1px solid #3a4453;
   white-space: nowrap;
 }
-.batt.warn { color: #ffcc66; border-color: #5a4a22; }
-.batt.crit { color: #ff7b7b; border-color: #6b2b2b; }
+.batt.warn { color: #ffd479; background: #3a2e12; border-color: #8a6a1f; }
+.batt.crit { color: #ff8a8a; background: #3f1a1a; border-color: #a13a3a; }
 #cpu { cursor: pointer; }
 
 /* The per-process list behind the CPU pill: a small panel under the bar,
