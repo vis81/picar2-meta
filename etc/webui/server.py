@@ -1123,7 +1123,9 @@ class RobotLink(Node):
         on_a_waypoint = d[closest] < self.ANCHOR_RADIUS_M
 
         if self.route_loop:
-            return (closest + 1) % n if on_a_waypoint else closest
+            if on_a_waypoint:
+                return (closest + 1) % n
+            return loop_entry_index(self._route_poses, p)
         if on_a_waypoint and closest == 0:
             return 1 if n > 1 else 0
         return 0
@@ -1505,6 +1507,29 @@ class RobotLink(Node):
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def loop_entry_index(poses, p) -> int:
+    """Which waypoint to head for first when joining a loop from anywhere.
+
+    The nearest waypoint is the wrong answer as soon as the robot stands
+    between two of them: set down 1.3 m past wp0 on the way to wp1, it was
+    sent back to wp0 - with wp0's heading - and needed 30 s of shunting to
+    get going (bag 20260914-092940). Joining the loop at the nearest
+    *segment* and heading for that segment's end is what a person would do.
+    """
+    n = len(poses)
+    best, best_d = 0, float("inf")
+    for i in range(n):
+        a, b = poses[i], poses[(i + 1) % n]
+        ax, ay, bx, by = a["x"], a["y"], b["x"], b["y"]
+        vx, vy = bx - ax, by - ay
+        L2 = vx * vx + vy * vy
+        t = 0.0 if L2 == 0 else clamp(((p["x"] - ax) * vx + (p["y"] - ay) * vy) / L2, 0.0, 1.0)
+        d = math.hypot(p["x"] - (ax + t * vx), p["y"] - (ay + t * vy))
+        if d < best_d:
+            best, best_d = (i + 1) % n, d
+    return best
 
 
 def _xy_yaw(tr):
