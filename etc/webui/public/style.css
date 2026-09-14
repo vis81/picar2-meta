@@ -40,7 +40,10 @@ html, body {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #chips { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-#batt, #settings { flex: 0 0 auto; }
+#batt, #cpu, #settings { flex: 0 0 auto; }
+/* The status text sits in the same opaque pill as the battery and CPU,
+   with the dot inside it; it is the one pill allowed to shrink. */
+.statepill { display: inline-flex; align-items: center; gap: 7px; flex: 0 1 auto; min-width: 0; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.live { background: var(--ok); }
 .dot.dead { background: var(--danger); }
