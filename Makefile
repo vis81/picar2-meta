@@ -154,7 +154,7 @@ else
   XHOST := true
 endif
 
-.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-route-gen odom-check bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
+.PHONY: all image image-pi image-push build deps pull status push firmware flash rviz rqt bringup sim slam slam-sim slam-resume slam-localize save-map cartographer cartographer-resume cartographer-localize save-cartographer-map amcl nav nav-sim explore explore-sim bench bench-explore bench-route bench-route-gen odom-check laps bench-keep bench-gen bench-report bench-gui bench-rviz teleop joystick \
         odom-cal imu-calib imu-verify mag-calib lidar-ld19 lidar-ld07 lidar-ld07-view sen0628 sen0628-view foxglove vizanti debug diag shell docker-shell \
         docker-start docker-stop sync2pi softap stack-setup stack-sim-setup stack-status stack-logs softap-down install-uarts webui webui-setup webui-stop fpv-setup fpv fpv-stop clean
 
@@ -370,6 +370,18 @@ bench-route:
 	  ros2 run picar2_benchmark bench-route $(_SCENARIO_YML) \
 	    --route-mode $(ROUTE_MODE) --sensor-noise $(NOISE) $(_OVERLAY_ARG) \
 	    -o $(BENCH_OUT); done"
+
+# N laps of the saved route at a top speed, with a bag that is fetched into
+# bags/, verified, removed from the robot and summed up (lap times, speeds,
+# collision-ahead stops, recoveries, Pi CPU, battery). Needs the robot
+# localized with a route loaded in the web UI.
+#
+#   make laps SPEED=1.5 LAPS=3 LABEL=la12
+LAPS  ?= 3
+SPEED ?= 1.0
+LABEL ?=
+laps:
+	$(CMD) "$(BENCH_SETUP) && python3 $(WS)/scripts/run_laps.py --speed $(SPEED) --laps $(LAPS) $(if $(LABEL),--label $(LABEL),)"
 
 # How good is the odometry, measured against the map. Runs on the PC on a
 # bag the web UI recorded (copy it over first), or live against the robot.
