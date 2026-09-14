@@ -37,6 +37,7 @@ import time
 import xmlrpc.client
 
 import rclpy
+import rclpy.task
 import numpy as np
 import yaml
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -53,7 +54,9 @@ from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Bool, String
 from tf2_msgs.msg import TFMessage
-from rclpy.action import ActionClient
+from unique_identifier_msgs.msg import UUID
+from action_msgs.msg import GoalInfo
+from action_msgs.srv import CancelGoal
 from rclpy.node import Node
 # Aliased: rcl_interfaces.msg.Parameter is already imported above for the
 # SetParameters service, and an unaliased import here shadows it — which
@@ -69,6 +72,7 @@ from waitress import serve
 # reference_timeout (0.5 s) is the backstop if this process dies outright.
 DRIVE_TIMEOUT_S = 0.4
 DRIVE_RATE_HZ = 20.0
+ROUTE_RATE_HZ = 5.0
 
 # The touch joystick drives at whatever top speed navigation is set to, so
 # one setting governs both. This is only the fallback for when navigation
@@ -84,6 +88,84 @@ MAX_LINEAR = 0.40
 # at 1.2 rad/s regardless, so asking for more than that achieves nothing.
 MIN_TURN_RADIUS_M = 0.34
 RELAY_MAX_ANGULAR = 1.2
+
+
+class LiteGoalHandle:
+    """What LiteActionClient hands back once a goal is accepted: the same
+    three things the code used from rclpy's ClientGoalHandle."""
+
+    def __init__(self, client, goal_id, accepted: bool):
+        self._client = client
+        self.goal_id = goal_id
+        self.accepted = accepted
+
+    def get_result_async(self):
+        """A future whose result has .status (action_msgs GoalStatus) and
+        .result. The server answers when the goal is done, as with the
+        real client."""
+        req = self._client.result_type.Request(goal_id=self.goal_id)
+        return self._client._result_cli.call_async(req)
+
+    def cancel_goal_async(self):
+        req = CancelGoal.Request(goal_info=GoalInfo(goal_id=self.goal_id))
+        return self._client._cancel_cli.call_async(req)
+
+
+class LiteActionClient:
+    """An action client without the feedback subscription.
+
+    rclpy's ActionClient subscribes to the action's feedback topic for its
+    whole life, and bt_navigator publishes NavigateThroughPoses feedback on
+    every behaviour-tree tick - 20 to 100 messages a second while a route
+    runs, each one an executor wake-up (~2.4 ms on the Pi) plus a message
+    to deserialise. Measured: a third of a core. Nothing here needed the
+    feedback (distance remaining comes from /plan now).
+
+    An action *is* three services and two topics; this talks to the three
+    services directly - send_goal, cancel_goal, get_result - which is what
+    the real client does underneath, minus the feedback and status
+    subscriptions. The service types come from the action type's Impl
+    (generated code, stable within a ROS distro, not a public API).
+    """
+
+    def __init__(self, node, action_type, name: str):
+        self.node = node
+        self.result_type = action_type.Impl.GetResultService
+        self._goal_cli = node.create_client(
+            action_type.Impl.SendGoalService, f"{name}/_action/send_goal")
+        self._cancel_cli = node.create_client(CancelGoal, f"{name}/_action/cancel_goal")
+        self._result_cli = node.create_client(
+            self.result_type, f"{name}/_action/get_result")
+        self._goal_type = action_type.Impl.SendGoalService
+
+    def server_is_ready(self) -> bool:
+        return (self._goal_cli.service_is_ready() and self._result_cli.service_is_ready()
+                and self._cancel_cli.service_is_ready())
+
+    def wait_for_server(self, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while not self.server_is_ready():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def send_goal_async(self, goal):
+        """A future whose result is a LiteGoalHandle (accepted or not)."""
+        goal_id = UUID(uuid=list(os.urandom(16)))
+        req = self._goal_type.Request(goal_id=goal_id, goal=goal)
+        inner = self._goal_cli.call_async(req)
+        outer = rclpy.task.Future()
+
+        def done(f):
+            try:
+                resp = f.result()
+            except Exception as e:                       # noqa: BLE001
+                outer.set_exception(e)
+                return
+            outer.set_result(LiteGoalHandle(self, goal_id, bool(resp.accepted)))
+        inner.add_done_callback(done)
+        return outer
 
 
 class RobotLink(Node):
@@ -203,7 +285,7 @@ class RobotLink(Node):
         # subprocess cannot be cancelled from outside. Everything here is
         # callback-driven, so the existing spin thread carries it and
         # _drive_tick stays the only timer.
-        self._nav = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self._nav = LiteActionClient(self, NavigateToPose, "navigate_to_pose")
         # The controller's top speed, read and written live. RPP handles this
         # one in its dynamic-parameter callback, so a set takes effect on the
         # next control cycle without restarting anything. It is not written
@@ -253,7 +335,7 @@ class RobotLink(Node):
         # It is back because arrival is no longer the BT's call. The server
         # watches the robot's own pose and counts a waypoint passed at its
         # closest approach, so trimming can no longer fabricate progress.
-        self._route_nav = ActionClient(self, NavigateThroughPoses,
+        self._route_nav = LiteActionClient(self, NavigateThroughPoses,
                                        "navigate_through_poses")
         self.waypoints: list[dict] = []
         self.route_active = False
@@ -292,6 +374,13 @@ class RobotLink(Node):
         # a fifth of this process's CPU.
         self._tick_timer = self.create_timer(1.0 / DRIVE_RATE_HZ,
                                              self._drive_tick)
+        # The route's own clock, slower: pass detection and deferred retries
+        # need ~0.2 s, not the joystick's 50 ms, and every timer wake-up is
+        # ~2.8 ms of rclpy on the Pi (97 % of this process's CPU while
+        # driving was executor bookkeeping, not callbacks). Cancelled while
+        # no route runs; reset by route_start and the retry scheduler.
+        self._route_timer = self.create_timer(1.0 / ROUTE_RATE_HZ, self._route_tick)
+        self._route_timer.cancel()
 
     def _on_explore_status(self, msg: ExploreStatus):
         self.explore_status = msg.status
@@ -546,6 +635,16 @@ class RobotLink(Node):
     def _on_plan(self, msg: NavPath):
         with self._lock:
             self._plan = msg
+        # Distance remaining, from the plan's length. It used to come from
+        # the action feedback, which bt_navigator publishes on every BT tick
+        # and which cost this process a third of a core to receive; the plan
+        # arrives at 1-2 Hz and is the same number.
+        if self.nav_state == "active" and len(msg.poses) > 1:
+            pts = msg.poses
+            self.nav_distance = round(sum(
+                math.hypot(b.pose.position.x - a.pose.position.x,
+                           b.pose.position.y - a.pose.position.y)
+                for a, b in zip(pts, pts[1:])), 2)
 
     def plan_points(self) -> tuple[bytes | None, str]:
         """The current global plan as map-frame float32 xy pairs."""
@@ -906,8 +1005,7 @@ class RobotLink(Node):
         self.nav_state = "pending"
         self.nav_goal = {"x": float(x), "y": float(y), "yaw": float(yaw)}
         self.nav_distance = None
-        fut = self._nav.send_goal_async(
-            goal, feedback_callback=lambda m: self._on_nav_feedback(m, seq))
+        fut = self._nav.send_goal_async(goal)
         fut.add_done_callback(lambda f: self._on_nav_accepted(f, seq))
         return True, ""
 
@@ -932,11 +1030,6 @@ class RobotLink(Node):
         # /cmd_vel stream the human thinks they own.
         if self._cancel_pending:
             self.cancel_goal()
-
-    def _on_nav_feedback(self, msg, seq):
-        if seq != self._goal_seq:
-            return
-        self.nav_distance = float(msg.feedback.distance_remaining)
 
     def _on_nav_result(self, fut, seq):
         if seq != self._goal_seq:
@@ -1059,7 +1152,7 @@ class RobotLink(Node):
         self.route_error = None
         self.route_idx = self._route_first_index()
         self.route_active = True
-        self._tick_timer.reset()          # the flow tick needs the clock
+        self._route_timer.reset()         # the flow tick needs the clock
         self._route_min_d = None
         self._route_sent_idx = None
         self._route_retries = 0
@@ -1302,7 +1395,7 @@ class RobotLink(Node):
             # which is the behaviour this backoff exists to stop.
             delay = self.ROUTE_RETRY_BACKOFF_S * self._route_retries
             self._route_retry_at = time.monotonic() + delay
-            self._tick_timer.reset()
+            self._route_timer.reset()
             logging.info("route: nav aborted on waypoint %d, retry %d/%d in "
                          "%.1fs", self.route_idx % n + 1, self._route_retries,
                          self.ROUTE_ABORT_RETRIES, delay)
@@ -1469,8 +1562,8 @@ class RobotLink(Node):
             linear, angular = self._drive
             fresh = (time.monotonic() - self._drive_stamp) < DRIVE_TIMEOUT_S
 
-        if not (fresh or self._drive_was_active or self.route_active):
-            self._tick_timer.cancel()      # reset() by set_drive/route_start
+        if not (fresh or self._drive_was_active):
+            self._tick_timer.cancel()      # reset() by set_drive
             return
 
         if fresh:
@@ -1485,23 +1578,25 @@ class RobotLink(Node):
             self._cmd_pub.publish(Twist())
             self._drive_was_active = False
 
+    def _route_tick(self):
+        if not self.route_active:
+            self._route_timer.cancel()     # reset() by route_start / a retry
+            return
         # A deferred retry after an aborted goal. Fired here because this is
         # the one timer the route has; doing it in the action callback would
         # mean sleeping in it.
-        if self.route_active and self._route_retry_at:
-            if time.monotonic() >= self._route_retry_at:
-                self._route_retry_at = 0.0
-                try:
-                    self._route_send_window()
-                except Exception:
-                    logging.exception("route: deferred retry failed")
-
+        if self._route_retry_at and time.monotonic() >= self._route_retry_at:
+            self._route_retry_at = 0.0
+            try:
+                self._route_send_window()
+            except Exception:
+                logging.exception("route: deferred retry failed")
         # A flow route advances on the robot's position rather than on an
-        # action result, so it needs a clock. This is the only timer.
-        if self.route_active and self.route_flow:
+        # action result, so it needs a clock.
+        if self.route_flow:
             try:
                 self._route_flow_tick()
-            except Exception:               # never kill the drive timer
+            except Exception:               # never kill the timer
                 pass
 
 
