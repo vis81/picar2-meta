@@ -243,7 +243,14 @@ class RobotLink(Node):
             ExploreStatus, "/explore/status", self._on_explore_status, 10)
         self.explore_status = None
         self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
+        # On its own node and thread: /tf arrives at 56 Hz (EKF, AMCL, the
+        # state publisher) and every arrival woke this node's executor, which
+        # rebuilds its ~40-entry wait set in Python each time - 3/4 of the
+        # process's CPU. node=None matters: rclpy moves a node to whichever
+        # executor added it last, so a spin_thread on *this* node would be
+        # emptied again by rclpy.spin(). The private node has two entities.
+        self._tf_listener = TransformListener(self._tf_buffer, None,
+                                              spin_thread=True)
 
         self._lock = threading.Lock()
         self._map: OccupancyGrid | None = None
@@ -254,7 +261,11 @@ class RobotLink(Node):
         self.pose_error = "no lookup yet"
         self._tf_valid_from = 0.0
 
-        self.create_timer(1.0 / DRIVE_RATE_HZ, self._drive_tick)
+        # Cancelled whenever there is nothing to tick (no joystick, no route)
+        # and reset by whatever creates work: 20 idle wake-ups a second were
+        # a fifth of this process's CPU.
+        self._tick_timer = self.create_timer(1.0 / DRIVE_RATE_HZ,
+                                             self._drive_tick)
 
     def _on_explore_status(self, msg: ExploreStatus):
         self.explore_status = msg.status
@@ -827,6 +838,7 @@ class RobotLink(Node):
         self.route_error = None
         self.route_idx = self._route_first_index()
         self.route_active = True
+        self._tick_timer.reset()          # the flow tick needs the clock
         self._route_min_d = None
         self._route_sent_idx = None
         self._route_retries = 0
@@ -1067,6 +1079,7 @@ class RobotLink(Node):
             # which is the behaviour this backoff exists to stop.
             delay = self.ROUTE_RETRY_BACKOFF_S * self._route_retries
             self._route_retry_at = time.monotonic() + delay
+            self._tick_timer.reset()
             logging.info("route: nav aborted on waypoint %d, retry %d/%d in "
                          "%.1fs", self.route_idx % n + 1, self._route_retries,
                          self.ROUTE_ABORT_RETRIES, delay)
@@ -1226,11 +1239,16 @@ class RobotLink(Node):
                 clamp(angular, -max_ang, max_ang),
             )
             self._drive_stamp = time.monotonic()
+        self._tick_timer.reset()
 
     def _drive_tick(self):
         with self._lock:
             linear, angular = self._drive
             fresh = (time.monotonic() - self._drive_stamp) < DRIVE_TIMEOUT_S
+
+        if not (fresh or self._drive_was_active or self.route_active):
+            self._tick_timer.cancel()      # reset() by set_drive/route_start
+            return
 
         if fresh:
             msg = Twist()
