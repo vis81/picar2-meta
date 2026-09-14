@@ -154,6 +154,34 @@ function renderBattery(b) {
   el.classList.toggle('crit', b.percent != null && b.percent <= 15);
 }
 
+// CPU pill: "51% 69°", coloured by cpu_monitor's own level (sustained low
+// idle, throttling, heat). Tapping it lists the top processes - the
+// breakdown is what says *which* node is eating the Pi, and that is the
+// question every time a run stutters.
+let cpuTopOpen = false;
+function renderCpu(c) {
+  const el = $('cpu');
+  if (!c || c.pct == null || Number.isNaN(c.pct)) {
+    el.classList.add('hidden'); $('cputop').classList.add('hidden'); return;
+  }
+  el.classList.remove('hidden');
+  el.textContent = `${c.pct}%` + (c.temp != null ? ` ${c.temp}°` : '');
+  el.title = c.message || '';
+  el.classList.toggle('warn', c.level === 1);
+  el.classList.toggle('crit', c.level >= 2);
+  const top = $('cputop');
+  top.classList.toggle('hidden', !cpuTopOpen);
+  if (cpuTopOpen) {
+    top.innerHTML = `<div class="cputop-head">${c.message || ''}</div>` +
+      (c.top || []).map(([n, p]) =>
+        `<div class="cputop-row"><span>${n}</span><span>${p.toFixed(0)}%</span></div>`).join('');
+  }
+}
+$('cpu').addEventListener('click', () => {
+  cpuTopOpen = !cpuTopOpen;
+  $('cputop').classList.toggle('hidden', !cpuTopOpen);
+});
+
 async function fetchPlan() {
   if (!showPlan) { plan = null; return; }
   try {
@@ -407,6 +435,7 @@ async function poll() {
     if (!speedBusy) maxSpeed = s.max_speed;
     if (s.speed_range) speedRange = s.speed_range;
     renderBattery(s.battery);
+    renderCpu(s.cpu);
     if (s.bag) { bag = s.bag; renderBag(); }
     if (s.slam_backend) slamBackend = s.slam_backend;
     if (s.drive_limits) driveLimits = s.drive_limits;

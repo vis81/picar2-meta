@@ -219,6 +219,21 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 }
 .batt.warn { color: #ffcc66; border-color: #5a4a22; }
 .batt.crit { color: #ff7b7b; border-color: #6b2b2b; }
+#cpu { cursor: pointer; }
+
+/* The per-process list behind the CPU pill: a small panel under the bar,
+   over the map, closed by tapping the pill again. */
+.cputop {
+  position: absolute; right: 12px; top: 44px; z-index: 5;
+  min-width: 220px; max-width: 80vw;
+  background: var(--bg); color: var(--text);
+  border: 1px solid #2a3240; border-radius: 10px;
+  padding: 8px 10px; font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 6px 18px rgba(0,0,0,.4);
+}
+.cputop-head { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.cputop-row { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }
 
 /* Bag recorder, under the status text. Small and out of the way until it
    is recording, then red with the elapsed time so a bag left running is

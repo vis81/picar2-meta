@@ -48,6 +48,7 @@ from nav2_msgs.srv import SetInitialPose
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from nav_msgs.msg import OccupancyGrid, Path as NavPath
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Bool, String
 from tf2_msgs.msg import TFMessage
@@ -167,6 +168,11 @@ class RobotLink(Node):
                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
                        history=HistoryPolicy.KEEP_LAST))
         self._battery = None
+        # cpu_monitor's summary (1 Hz), for the pill in the top bar. The EKF
+        # publishes on the same topic; anything that is not 'cpu' is ignored.
+        self.create_subscription(
+            DiagnosticArray, "/diagnostics", self._on_diagnostics, 5)
+        self._cpu = None
 
         self._cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         # explore_lite stops permanently the first time it finds no frontiers.
@@ -504,6 +510,37 @@ class RobotLink(Node):
             return None
         return {"volts": round(float(v), 2),
                 "percent": None if pct != pct else round(float(pct) * 100)}
+
+    def _on_diagnostics(self, msg: DiagnosticArray):
+        st = {s.name: s for s in msg.status}
+        if "cpu" not in st:
+            return
+        kv = {v.key: v.value for v in st["cpu"].values}
+        top = []
+        if "cpu/top" in st:
+            for v in st["cpu/top"].values[:8]:
+                try:
+                    top.append([v.key, float(v.value.split("%")[0])])
+                except ValueError:
+                    pass
+        with self._lock:
+            self._cpu = {
+                "pct": round(float(kv.get("total_pct", "nan"))),
+                "temp": (round(float(kv["temp_c"])) if "temp_c" in kv else None),
+                "level": (st["cpu"].level[0] if isinstance(st["cpu"].level, (bytes, bytearray))
+                          else int(st["cpu"].level)),
+                "message": st["cpu"].message,
+                "top": top,
+                "_t": self.get_clock().now().nanoseconds * 1e-9,
+            }
+
+    def cpu(self):
+        """cpu_monitor's latest summary, or None when it has gone quiet."""
+        with self._lock:
+            c = self._cpu
+        if c is None or self.get_clock().now().nanoseconds * 1e-9 - c["_t"] > 5.0:
+            return None
+        return {k: v for k, v in c.items() if k != "_t"}
 
     def _on_plan(self, msg: NavPath):
         with self._lock:
@@ -2715,6 +2752,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
             "localized": modes.mode == "localize" and pose is not None,
             "modes": modes.status(),
             "battery": link.battery(),
+            "cpu": link.cpu(),
             "bag": bag.status(),
             "slam_backend": modes.slam_backend,
             # robot | sim. The UI does not branch on it, but anything talking
