@@ -27,6 +27,7 @@ import json
 import math
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -2643,11 +2644,17 @@ class BagRecorder:
     def active(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def start(self) -> tuple[bool, str]:
+    def start(self, label: str = "") -> tuple[bool, str]:
+        """label becomes a suffix of the folder name (`<stamp>_<label>`), so
+        a run is named for what it was from the start instead of being
+        renamed by hand on the PC afterwards."""
         with self._lock:
             if self.active():
                 return True, self.name
             name = time.strftime("%Y%m%d-%H%M%S")
+            label = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip()).strip("-")[:60]
+            if label:
+                name += "_" + label
             out = os.path.join(self.dir, name)
             try:
                 os.makedirs(self.dir, exist_ok=True)
@@ -3122,7 +3129,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         manual driving in mapping mode is as useful as one of a route."""
         b = body()
         if bool(b.get("on", False)):
-            ok, msg = bag.start()
+            ok, msg = bag.start(str(b.get("label", "") or ""))
             if not ok:
                 return jsonify({"ok": False, "error": msg}), 500
         else:

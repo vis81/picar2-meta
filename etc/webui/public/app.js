@@ -643,10 +643,18 @@ $('cancelgoal').onclick = () => post('/api/goal/cancel');
 
 $('bag').onclick = async () => {
   if (bagBusy) return;
+  // A label names the bag for what the run is (speed, what changed) so it
+  // never needs renaming on the PC; empty is fine.
+  let label = '';
+  if (!bag.active) {
+    label = prompt('Label for this bag (optional, e.g. 150_3laps)', localStorage.getItem('bagLabel') || '');
+    if (label === null) return;            // cancelled
+    try { localStorage.setItem('bagLabel', label); } catch (e) {}
+  }
   bagBusy = true;
   $('bag').textContent = bag.active ? 'stopping…' : 'starting…';
   try {
-    const r = await (await post('/api/bag', { on: !bag.active })).json();
+    const r = await (await post('/api/bag', { on: !bag.active, label })).json();
     if (r.bag) bag = r.bag;
   } catch (e) {}
   bagBusy = false;
