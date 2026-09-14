@@ -40,7 +40,8 @@ import numpy as np
 import yaml
 from flask import Flask, Response, jsonify, request, send_from_directory
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import (PolygonStamped, PoseStamped,
+                               PoseWithCovarianceStamped, Twist)
 from explore_lite_msgs.msg import ExploreStatus
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import SetInitialPose
@@ -49,6 +50,7 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from nav_msgs.msg import OccupancyGrid, Path as NavPath
 from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Bool, String
+from tf2_msgs.msg import TFMessage
 from rclpy.action import ActionClient
 from rclpy.node import Node
 # Aliased: rcl_interfaces.msg.Parameter is already imported above for the
@@ -118,9 +120,13 @@ class RobotLink(Node):
         # now — the lidar and ToF returns after marking and inflation. Worth
         # showing: a false obstacle is invisible on the static map, and that
         # is exactly the failure that cost a test route most of one leg.
-        self.create_subscription(OccupancyGrid, "/local_costmap/costmap",
-                                 self._on_local_costmap, map_qos)
+        # Subscribed only while a browser is asking for the overlay - see
+        # _overlay_housekeeping. Every message wakes rclpy's executor, and on
+        # the Pi each wake-up is ~2.4 ms of Python whatever the message is.
         self._local: OccupancyGrid | None = None
+        self._local_sub = None
+        self._footprint_sub = None
+        self._footprints: list[tuple[float, float, float, float]] = []
 
         # The path Nav2 is actually following. /plan is the global plan as
         # published each replan; it is already in the map frame, so unlike the
@@ -128,13 +134,30 @@ class RobotLink(Node):
         # together they answer "why is it going that way" without a laptop.
         self.create_subscription(NavPath, "/plan", self._on_plan, 5)
         self._plan: NavPath | None = None
-        # Raw lidar for the UI overlay. Kept as the last message and only
-        # converted on request: 360 points at 10 Hz is nothing to store and
-        # too much to project when nobody is looking.
-        self.create_subscription(
-            LaserScan, "/lidar_node/scan", self._on_scan,
-            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        # Raw lidar for the UI overlay - on demand as well (10 Hz).
         self._scan: LaserScan | None = None
+        self._scan_sub = None
+        self._overlay_want: dict[str, float] = {}
+        self.create_timer(1.0, self._overlay_housekeeping)
+
+        # AMCL's own estimate: latched, republished on every filter update
+        # (the robot moved 0.1 m / 0.1 rad). In localize mode this is the
+        # robot pose, and the only /tf consumer left in this process is the
+        # TF listener in mapping mode. Cutoff semantics as for TF - see
+        # forget_tf.
+        self._amcl_pose: tuple[float, float, float, float] | None = None
+        self.create_subscription(
+            PoseWithCovarianceStamped, "/amcl_pose", self._on_amcl_pose,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # The robot's own links (base_footprint -> laser_link), published
+        # once at bringup. A buffer fed from /tf_static alone resolves them
+        # without a listener on the 56 Hz /tf.
+        self._static_buf = Buffer()
+        self.create_subscription(
+            TFMessage, "/tf_static", self._on_tf_static,
+            QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # Latched by the publisher at 1 Hz, so a late subscriber still gets
         # the last reading rather than waiting a second for the next one.
@@ -242,15 +265,11 @@ class RobotLink(Node):
         self.create_subscription(
             ExploreStatus, "/explore/status", self._on_explore_status, 10)
         self.explore_status = None
-        self._tf_buffer = Buffer()
-        # On its own node and thread: /tf arrives at 56 Hz (EKF, AMCL, the
-        # state publisher) and every arrival woke this node's executor, which
-        # rebuilds its ~40-entry wait set in Python each time - 3/4 of the
-        # process's CPU. node=None matters: rclpy moves a node to whichever
-        # executor added it last, so a spin_thread on *this* node would be
-        # emptied again by rclpy.spin(). The private node has two entities.
-        self._tf_listener = TransformListener(self._tf_buffer, None,
-                                              spin_thread=True)
+        # Only in mapping mode, where there is no pose topic - see
+        # set_tf_listener. /tf runs at 56 Hz and every message costs rclpy
+        # ~2.4 ms of executor overhead on the Pi, listener or not.
+        self._tf_buffer: Buffer | None = None
+        self._tf_listener: TransformListener | None = None
 
         self._lock = threading.Lock()
         self._map: OccupancyGrid | None = None
@@ -315,6 +334,110 @@ class RobotLink(Node):
         self.waypoints = []
         self.route_passed = 0
         self.route_error = None
+
+    def set_tf_listener(self, on: bool):
+        """Start or stop listening to /tf. Mapping mode needs it for the pose;
+        localize mode has /amcl_pose and the static links instead."""
+        if on and self._tf_listener is None:
+            self._tf_buffer = Buffer()
+            # node=None matters: rclpy moves a node to whichever executor
+            # added it last, so a spin_thread on *this* node would be
+            # emptied again by rclpy.spin(). The private node has two
+            # entities and its own thread.
+            self._tf_listener = TransformListener(self._tf_buffer, None,
+                                                  spin_thread=True)
+            logging.info("tf listener on")
+        elif not on and self._tf_listener is not None:
+            lis, self._tf_listener, self._tf_buffer = self._tf_listener, None, None
+            lis.unregister()
+            lis.executor.shutdown(timeout_sec=1.0)
+            lis.node.destroy_node()
+            logging.info("tf listener off")
+
+    def want_overlay(self, name: str):
+        """A browser asked for this overlay; keep its topics subscribed."""
+        self._overlay_want[name] = time.monotonic()
+
+    def _overlay_housekeeping(self):
+        """Subscribe to what the open browsers are drawing, unsubscribe a few
+        seconds after the last request. Runs on the executor thread, where
+        creating and destroying subscriptions is safe."""
+        now = time.monotonic()
+        def wanted(name):
+            return now - self._overlay_want.get(name, -1e9) < 5.0
+        if wanted("scan") and self._scan_sub is None:
+            self._scan_sub = self.create_subscription(
+                LaserScan, "/lidar_node/scan", self._on_scan,
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        elif not wanted("scan") and self._scan_sub is not None:
+            self.destroy_subscription(self._scan_sub)
+            self._scan_sub = None
+            with self._lock:
+                self._scan = None
+        if wanted("obstacles") and self._local_sub is None:
+            self._local_sub = self.create_subscription(
+                OccupancyGrid, "/local_costmap/costmap",
+                self._on_local_costmap, self._costmap_qos)
+            # The costmap is in odom; the robot's odom pose at the same
+            # update comes from the footprint the costmap publishes with it.
+            self._footprint_sub = self.create_subscription(
+                PolygonStamped, "/local_costmap/published_footprint",
+                self._on_footprint, 5)
+        elif not wanted("obstacles") and self._local_sub is not None:
+            self.destroy_subscription(self._local_sub)
+            self.destroy_subscription(self._footprint_sub)
+            self._local_sub = self._footprint_sub = None
+            with self._lock:
+                self._local = None
+                self._footprints.clear()
+
+    def _on_amcl_pose(self, msg: PoseWithCovarianceStamped):
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        with self._lock:
+            self._amcl_pose = (
+                msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+                msg.pose.pose.position.x, msg.pose.pose.position.y, yaw)
+
+    def _on_tf_static(self, msg: TFMessage):
+        for tr in msg.transforms:
+            self._static_buf.set_transform_static(tr, "static")
+
+    # The costmaps' footprint, base_footprint at the rear axle (nav2.yaml).
+    # Read from the costmap itself when it is up; this is the fallback.
+    FOOTPRINT = [[-0.04, -0.095], [-0.04, 0.095], [0.30, 0.095], [0.30, -0.095]]
+
+    def _on_footprint(self, msg: PolygonStamped):
+        """Recover the robot's odom pose from the published footprint.
+
+        The polygon is the configured footprint transformed by the robot's
+        pose at the costmap update, points in the configured order, so the
+        rigid transform between the two point sets is that pose. Solved by
+        least squares over all corners (Procrustes with known pairs).
+        """
+        fp = getattr(self, "_footprint_cfg", None) or self.FOOTPRINT
+        if len(msg.polygon.points) != len(fp):
+            return
+        P = np.array([[pt.x, pt.y] for pt in msg.polygon.points])
+        F = np.array(fp, dtype=float)
+        pc, fc = P.mean(axis=0), F.mean(axis=0)
+        dp, df = P - pc, F - fc
+        yaw = math.atan2(float(np.sum(df[:, 0] * dp[:, 1] - df[:, 1] * dp[:, 0])),
+                         float(np.sum(df[:, 0] * dp[:, 0] + df[:, 1] * dp[:, 1])))
+        c, sn = math.cos(yaw), math.sin(yaw)
+        x = pc[0] - (c * fc[0] - sn * fc[1])
+        y = pc[1] - (sn * fc[0] + c * fc[1])
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        with self._lock:
+            self._footprints.append((stamp, x, y, yaw))
+            del self._footprints[:-10]
+
+    def _map_from_base(self):
+        """(x, y, yaw) of base_footprint in map, or None - the current pose
+        source, whichever it is."""
+        p = self.pose()
+        return (p["x"], p["y"], p["yaw"]) if p else None
 
     def forget_tf(self):
         """Treat transforms older than now as belonging to the previous mode.
@@ -420,22 +543,46 @@ class RobotLink(Node):
             msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
         if age > 2.0:
             return b"", ""                      # lidar stopped: draw nothing
-        try:
-            tf = self._tf_buffer.lookup_transform(
-                "map", msg.header.frame_id.lstrip("/"), Time())
-        except Exception as e:
-            return None, f"{type(e).__name__}: {e}"
+        frame = msg.header.frame_id.lstrip("/")
+        pose = self._frame_in_map(frame)
+        if pose is None:
+            return None, self.pose_error or f"no map->{frame}"
+        x0, y0, yaw = pose
         r = np.asarray(msg.ranges, dtype=np.float32)
         ok = np.isfinite(r) & (r > msg.range_min) & (r < msg.range_max)
         a = msg.angle_min + np.arange(len(r), dtype=np.float32) * msg.angle_increment
         lx, ly = r[ok] * np.cos(a[ok]), r[ok] * np.sin(a[ok])
-        t, q = tf.transform.translation, tf.transform.rotation
-        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         c, sn = math.cos(yaw), math.sin(yaw)
-        pts = np.column_stack([t.x + lx * c - ly * sn,
-                               t.y + lx * sn + ly * c]).astype(np.float32)
+        pts = np.column_stack([x0 + lx * c - ly * sn,
+                               y0 + lx * sn + ly * c]).astype(np.float32)
         return pts.tobytes(), ""
+
+    def _frame_in_map(self, frame: str):
+        """(x, y, yaw) of one of the robot's own frames in map, or None.
+
+        With a TF listener it is one lookup. Without, it is the pose of
+        base_footprint (AMCL) composed with the static link to the frame."""
+        if self._tf_buffer is not None:
+            try:
+                tf = self._tf_buffer.lookup_transform("map", frame, Time())
+            except Exception as e:
+                self.pose_error = f"{type(e).__name__}: {e}"
+                return None
+            return _xy_yaw(tf.transform)
+        base = self._map_from_base()
+        if base is None:
+            return None
+        if frame == "base_footprint":
+            return base
+        try:
+            st = self._static_buf.lookup_transform("base_footprint", frame, Time())
+        except Exception as e:
+            self.pose_error = f"static base_footprint->{frame}: {e}"
+            return None
+        bx, by, byaw = base
+        sx, sy, syaw = _xy_yaw(st.transform)
+        c, sn = math.cos(byaw), math.sin(byaw)
+        return (bx + c * sx - sn * sy, by + sn * sx + c * sy, byaw + syaw)
 
     def local_cell_size(self) -> float:
         with self._lock:
@@ -475,20 +622,34 @@ class RobotLink(Node):
         px = info.origin.position.x + (cols + 0.5) * info.resolution
         py = info.origin.position.y + (rows + 0.5) * info.resolution
 
-        frame = msg.header.frame_id or "odom"
-        if frame.lstrip("/") != "map":
-            try:
-                tf = self._tf_buffer.lookup_transform("map", frame, Time())
-            except Exception as e:                           # noqa: BLE001
-                # Better nothing than obstacles drawn somewhere the robot
-                # never actually saw anything.
-                return None, "no %s->map transform: %s" % (frame, e)
-            t = tf.transform.translation
-            q = tf.transform.rotation
-            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        frame = (msg.header.frame_id or "odom").lstrip("/")
+        if frame != "map":
+            if self._tf_buffer is not None:
+                try:
+                    tf = self._tf_buffer.lookup_transform("map", frame, Time())
+                except Exception as e:                       # noqa: BLE001
+                    # Better nothing than obstacles drawn somewhere the
+                    # robot never actually saw anything.
+                    return None, "no %s->map transform: %s" % (frame, e)
+                x0, y0, yaw = _xy_yaw(tf.transform)
+            else:
+                # No /tf here. The cells are in odom; take them to the robot
+                # with its odom pose from the footprint published at the same
+                # costmap update, then to the map with AMCL's pose. What is
+                # left is AMCL's own lag, under 0.1 m.
+                stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+                with self._lock:
+                    fps = list(self._footprints)
+                base = self._map_from_base()
+                if not fps or base is None:
+                    return None, "no footprint or pose yet"
+                _, ox, oy, oyaw = min(fps, key=lambda f: abs(f[0] - stamp))
+                c, sn = math.cos(-oyaw), math.sin(-oyaw)
+                px, py = px - ox, py - oy
+                px, py = c * px - sn * py, sn * px + c * py   # now in base
+                x0, y0, yaw = base
             c, sn = math.cos(yaw), math.sin(yaw)
-            px, py = t.x + c * px - sn * py, t.y + sn * px + c * py
+            px, py = x0 + c * px - sn * py, y0 + sn * px + c * py
         return np.column_stack([px, py]).astype(np.float32).tobytes(), ""
 
     def has_map(self) -> bool:
@@ -507,6 +668,8 @@ class RobotLink(Node):
 
     def tf_frames(self) -> str:
         """Whole TF tree as the buffer sees it — shows which link is missing."""
+        if self._tf_buffer is None:
+            return "no tf listener (localize mode uses /amcl_pose)"
         try:
             return self._tf_buffer.all_frames_as_yaml()
         except Exception as e:
@@ -520,7 +683,23 @@ class RobotLink(Node):
 
     # ── pose ─────────────────────────────────────────────────────────────
     def pose(self):
-        """Robot pose in the map frame, or None before the map exists."""
+        """Robot pose in the map frame, or None before there is one.
+
+        Localize mode: AMCL's /amcl_pose. Mapping mode: the TF listener,
+        because SLAM publishes no pose topic. Both honour the forget_tf
+        cutoff, so a pose left over from the previous mode is not a pose.
+        """
+        if self._tf_buffer is None:
+            with self._lock:
+                ap = self._amcl_pose
+            if ap is None:
+                self.pose_error = "no /amcl_pose yet"
+                return None
+            if ap[0] < self._tf_valid_from:
+                self.pose_error = "stale pose from the previous mode"
+                return None
+            self.pose_error = None
+            return {"x": ap[1], "y": ap[2], "yaw": ap[3]}
         try:
             tf = self._tf_buffer.lookup_transform(
                 "map", "base_footprint", Time()
@@ -578,15 +757,19 @@ class RobotLink(Node):
         # case where the service exists but the call was slow.
         self._initpose_pub.publish(msg)
 
-        # AMCL withholds map→odom until it believes it knows where it is, so
-        # a pose appearing is positive proof it accepted this one. Without
-        # the check a pose outside the map is discarded in silence.
+        # AMCL republishes /amcl_pose on the first scan after an initial
+        # pose, so an estimate stamped after the request is positive proof
+        # it accepted this one. Without the check a pose outside the map is
+        # discarded in silence.
+        sent = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
-            if self.pose() is not None:
+            with self._lock:
+                ap = self._amcl_pose
+            if ap is not None and ap[0] >= sent - 0.2:
                 return True, ""
             time.sleep(0.1)
-        return False, "AMCL took the pose but published no transform"
+        return False, "AMCL took the pose but published no estimate"
 
     # ── speed ────────────────────────────────────────────────────────────
     SPEED_PARAM = "FollowPath.desired_linear_vel"
@@ -1286,6 +1469,13 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def _xy_yaw(tr):
+    """(x, y, yaw) of a geometry_msgs Transform - two_d_mode, yaw only."""
+    t, q = tr.translation, tr.rotation
+    return (t.x, t.y, math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                 1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+
+
 
 class Supervisor:
     """The supervisord running as PID 1 in this container.
@@ -1471,6 +1661,8 @@ class ModeStack:
             self.mode = "mapping"
             self.slam_backend = self._backend_from_args()
             self.phase = "mapping (adopted)"
+            if link is not None:
+                link.set_tf_listener(True)
         elif localizing:
             self.mode = "localize"
             self.map_name = self._map_name_from_args()
@@ -1740,6 +1932,7 @@ class ModeStack:
         self.phase = "idle"
         link.forget_map()
         link.forget_tf()
+        link.set_tf_listener(False)
 
     def _to_mapping(self, link: "RobotLink", gen: int):
         """Caller holds _busy."""
@@ -1752,6 +1945,7 @@ class ModeStack:
         # cartographer failed to start.
         link.forget_map()
         link.forget_tf()
+        link.set_tf_listener(True)
         self.mode = "mapping"
         self.map_name = None
 
@@ -1777,6 +1971,7 @@ class ModeStack:
             return
         link.forget_map()
         link.forget_tf()
+        link.set_tf_listener(False)
         self.mode = "localize"
         self.map_name = map_name
         # forget_map() has just cleared the waypoints, which is right — they
@@ -2587,6 +2782,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
     @app.route("/api/scan")
     def get_scan():
         """The latest lidar scan, as raw float32 map-frame xy like /api/plan."""
+        link.want_overlay("scan")
         pts, why = link.scan_points()
         if pts is None:
             return (why, 404)
@@ -2602,6 +2798,7 @@ def build_app(link: RobotLink, modes: ModeStack, ws: str, root: str) -> Flask:
         cluttered room enough of them are marked that the JSON of the same
         thing is several times the size, fetched twice a second.
         """
+        link.want_overlay("obstacles")
         pts, why = link.local_obstacles()
         if pts is None:
             return (why, 404)
