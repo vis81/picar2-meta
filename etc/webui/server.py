@@ -2588,6 +2588,8 @@ class BagRecorder:
         # Every node's log lines, time-aligned with the data: the
         # "collision ahead" sits next to the scan that caused it.
         "/rosout",
+        # CPU load, temperature, throttling and the top processes, 1 Hz.
+        "/diagnostics",
         "/behavior_tree_log", "/follow_path/_action/status",
         "/navigate_through_poses/_action/status",
         "/compute_path_through_poses/_action/status",
