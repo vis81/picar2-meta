@@ -17,7 +17,7 @@ repositories:
     version: master
   ldrobot-lidar-ros2:
     type: git
-    url: https://github.com/Myzhar/ldrobot-lidar-ros2.git
+    url: https://github.com/vis81/ldrobot-lidar-ros2.git
     version: main
   ldrobot-lidar-ros2/ldlidar_component/ldlidar_stl_sdk:
     type: git

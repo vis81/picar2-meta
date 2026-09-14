@@ -23,7 +23,7 @@ picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, 
     yahboom/                  ← Zephyr firmware (own git; COLCON_IGNORE'd by make deps)
     lds02rr_lidar/            ← LDS02RR (Neato XV-11) driver
     ldrobot_ld07/             ← LD07 structured-light depth sensor driver
-    ldrobot-lidar-ros2/       ← LD19 lidar (external)
+    ldrobot-lidar-ros2/       ← LD19 lidar (our fork: survives a USB replug)
     tof_imager_ros/           ← SEN0628 matrix ToF driver
     vizanti/                  ← web mission planner (external, forked)
     explore_lite/             ← frontier exploration (external)
