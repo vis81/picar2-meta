@@ -827,7 +827,7 @@ class RobotLink(Node):
     # from lap times. Measured in sim on the office route, 0.7 m/s was 28.3 s
     # a lap against 32.0 at 0.6, with no missed waypoints — faster, and the
     # cost was accuracy (mean approach 0.043 -> 0.060 m), not safety.
-    SPEED_MAX = 1.5
+    SPEED_MAX = 2.0
     SPEED_MIN = 0.1
 
     def _call(self, client, req, timeout=3.0):
