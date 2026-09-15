@@ -34,6 +34,10 @@ repositories:
     type: git
     url: https://github.com/Nathan85001/imu_calib.git
     version: ros2
+  sen0628_tof:
+    type: git
+    url: https://github.com/vis81/sen0628_tof.git
+    version: master
   tof_imager_ros:
     type: git
     url: https://github.com/vis81/tof_imager_ros.git

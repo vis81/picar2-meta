@@ -24,7 +24,7 @@ picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, 
     lds02rr_lidar/            ← LDS02RR (Neato XV-11) driver
     ldrobot_ld07/             ← LD07 structured-light depth sensor driver
     ldrobot-lidar-ros2/       ← LD19 lidar (our fork: survives a USB replug)
-    tof_imager_ros/           ← SEN0628 matrix ToF driver
+    sen0628_tof/              ← SEN0628 matrix ToF driver (C++, ours); tof_imager_ros/ is the Python original
     vizanti/                  ← web mission planner (external, forked)
     explore_lite/             ← frontier exploration (external)
     imu_calib/                ← accel/gyro calibration (external)
