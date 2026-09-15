@@ -455,7 +455,7 @@ bench-report:
 
 # Attach viewers to a `make bench-keep` session.
 bench-gui:
-	$(CMD) "$(BENCH_SETUP) && gz sim -g"
+	$(CMD) "$(BENCH_SETUP) && export GZ_SIM_RESOURCE_PATH=$(_GZ_RESOURCE_PATH) && gz sim -g"
 
 bench-rviz:
 	$(CMD) "$(BENCH_SETUP) && rviz2 -d $(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config/rviz.rviz --ros-args -p use_sim_time:=true"
