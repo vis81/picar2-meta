@@ -55,15 +55,27 @@ NAV2_FORK      ?= https://github.com/vis81/navigation2.git
 NAV2_BRANCH    ?= picar2/1.3.12
 CONTAINER_NAME ?= picar2   # persistent container name for docker-start / docker-stop
 
+# ROS_SRC=1: run against the ROS 2 built from source in ros_src/ (see
+# ros_src/Makefile) instead of the Ubuntu packages in /opt/ros/jazzy. Its own
+# build/install trees, so both installs stay usable side by side.
+ROS_SRC        ?= 0
+
 # ── Path and build directories (differ inside docker vs. on host) ────────────
 ifeq ($(EXEC_ENV),docker)
 WS_PATH      := /ws
 BUILD_BASE   := build-docker
 INSTALL_BASE := install-docker
+ROS_DIST     := /opt/ros/jazzy
+else ifeq ($(ROS_SRC),1)
+WS_PATH      := $(WS)
+BUILD_BASE   := build-src
+INSTALL_BASE := install-src
+ROS_DIST     := $(WS)/ros_src/install
 else
 WS_PATH      := $(WS)
 BUILD_BASE   := build
 INSTALL_BASE := install
+ROS_DIST     := /opt/ros/jazzy
 endif
 
 # ── World file path resolution ───────────────────────────────────────────────
@@ -78,13 +90,13 @@ endif
 # ── ROS setup strings (inlined into every bash -c command) ───────────────────
 ROS_SETUP    := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
                 export CYCLONEDDS_URI=file://$(WS_PATH)/cyclonedds.xml && \
-                source /opt/ros/jazzy/setup.bash && \
+                source $(ROS_DIST)/setup.bash && \
                 source $(WS_PATH)/$(INSTALL_BASE)/setup.bash
 
 ROS_SETUP_PC := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
                 export CYCLONEDDS_URI=file://$(WS_PATH)/cyclonedds-pc.xml && \
                 export PI_IP=$(PI_IP) && export PC_IFACE=$(PC_IFACE) && \
-                source /opt/ros/jazzy/setup.bash && \
+                source $(ROS_DIST)/setup.bash && \
                 source $(WS_PATH)/$(INSTALL_BASE)/setup.bash
 
 # ── Navigation benchmark ─────────────────────────────────────────────────────
@@ -111,7 +123,7 @@ BENCH_OUT    ?= /tmp/picar2_bench/results
 BENCH_SETUP  := export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && \
                 unset CYCLONEDDS_URI && \
                 export ROS_DOMAIN_ID=$(BENCH_DOMAIN) && \
-                source /opt/ros/jazzy/setup.bash && \
+                source $(ROS_DIST)/setup.bash && \
                 source $(WS_PATH)/$(INSTALL_BASE)/setup.bash
 
 _BENCH_SHARE := $(WS_PATH)/$(INSTALL_BASE)/picar2_benchmark/share/picar2_benchmark
@@ -290,7 +302,7 @@ sync2pc:
 	done
 
 build:
-	$(CMD) "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
+	$(CMD) "source $(ROS_DIST)/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
 
 clean:
 	$(CMD) "rm -rf $(WS_PATH)/$(BUILD_BASE) $(WS_PATH)/$(INSTALL_BASE) $(WS_PATH)/log"
@@ -600,7 +612,7 @@ shell:
 
 # docker-shell: always execs into $(CONTAINER_NAME) regardless of EXEC_ENV
 docker-shell:
-	docker exec -it $(CONTAINER_NAME) bash -c "source /opt/ros/jazzy/setup.bash && source /ws/install-docker/setup.bash && exec bash"
+	docker exec -it $(CONTAINER_NAME) bash -c "source $(ROS_DIST)/setup.bash && source /ws/install-docker/setup.bash && exec bash"
 
 # ── Sync to Pi ───────────────────────────────────────────────────────────────
 sync2pi:

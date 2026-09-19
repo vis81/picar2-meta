@@ -1,7 +1,9 @@
 build/
 build-docker/
+build-src/
 install/
 install-docker/
+install-src/
 log/
 bags/
 src/
@@ -19,3 +21,5 @@ setenv.sh
 logs/
 # Layer arguments and the active profile, written at run time by the web UI.
 run/
+# ROS 2 source build (own git repo)
+ros_src/
