@@ -1,0 +1,7 @@
+# Dockerfile only COPYs package.xml files from src/; keep the big trees out of the context.
+ros_src/
+build*/
+install*/
+log/
+bags/
+maps/
