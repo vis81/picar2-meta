@@ -37,6 +37,48 @@ Each `src/*` entry is an independent git repo. `make status` / `make pull` /
 `vis81`-owned remotes). Firmware work is documented separately in
 `src/yahboom/CLAUDE.md` — read that before touching Zephyr code.
 
+**Branches.** No dev/stable split — work happens on ordinary topic branches,
+created freely, named the same across every repo a change touches (e.g.
+`soft-wp` exists in the meta repo, `picar2-ros2` and `navigation2` at once for
+one piece of work). Commit locally as often as you like; **push to GitHub only
+on the user's explicit word** (`make push`, `FORCE=1` for a force-push with
+lease). Each repo's own stable/default line is whatever `.repos` pins it to,
+and it is **not** the same name everywhere:
+
+| Repo | Stable branch |
+|---|---|
+| meta (this repo), `picar2-ros2`, `yahboom`, `lds02rr_lidar`, `ldrobot_ld07`, `sen0628_tof`, `tof_imager_ros` | `master` |
+| `navigation2` (our Smac/RPP fork) | `picar2/1.3.12` |
+| `ldrobot-lidar-ros2` | `main` |
+| `explore_lite` (fork of `m-explore-ros2`) | `picar2/main` — the `picar2/` prefix distinguishes our line from `upstream/main` |
+| `robotnik_gazebo_worlds` | `picar2/jazzy-devel` — same reason, `upstream` is `RobotnikAutomation/robotnik_gazebo_worlds` |
+| `vizanti` | `ros2` |
+
+Two commands switch every repo at once instead of one at a time:
+
+```bash
+make checkout BRANCH=soft-wp    # PC: this repo + every src/ repo that has it
+make sync2pc                    # run ON THE PI: matches each repo to whatever
+                                 # branch that repo is on for the PC — no name
+                                 # to type, so meta can be on soft-wp while
+                                 # navigation2 is correctly on picar2/1.3.12
+```
+
+`checkout` reports per repo and **skips** (not fails) any repo without that
+branch — asking for `BRANCH=master` will skip `navigation2`, `explore_lite`
+and the others above by design; check those out by their own name when you
+mean the stable line. Neither command builds anything; a checkout that
+changed C++ still needs `EXEC_ENV=docker make build` (or a per-package
+`colcon build`) afterward.
+
+Deploying to the Pi is git, never rsync: each repo on the Pi carries a `pc`
+remote pointing straight at the PC's own live checkout over ssh
+(`ssh://chia@chia.local/<absolute path to this repo or src/<name>>`), and
+`sync2pc` is a `git fetch pc && git checkout -f -B <branch> pc/<branch>` in
+each one, run locally on the Pi — the Pi's checkout is a deploy target, not
+a place to keep unique work, so this force-discards anything uncommitted
+there. See the **Never run `make sync2pi`** pitfall below.
+
 ## Build & Run
 
 Every target runs either directly on the host or inside Docker, selected by
@@ -287,7 +329,10 @@ TCP 4444 (`putty -raw <pi-ip> 4444`).
 - **Never hand-edit `.rviz` files.** A missing or incomplete `Views/Current` block
   makes the Ogre render panel silently ignore mouse input (Qt menus keep working).
   Configure in RViz and use File → Save Config As.
-- **Never run `make sync2pi`** or any rsync to the Pi — syncing is done by hand.
+- **Never run `make sync2pi`** or any rsync to the Pi — deploy by running
+  `make sync2pc` on the Pi itself (git, see Branches above), which lets each
+  repo's `.gitignore` / `COLCON_IGNORE` do their job instead of copying build
+  artifacts and everything else in the tree wholesale.
 - **PC tools need `PI_IP` + `PC_IFACE`.** Empty values fail silently.
 - **Clock skew breaks TF** across Pi/PC. chrony setup is in the README.
 - **Steer units**: the CMD_VEL steer field is a µs delta from the servo center, not

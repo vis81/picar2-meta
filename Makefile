@@ -10,6 +10,13 @@ endif
 
 PI_IP    ?=
 PC_IFACE ?=
+# What the Pi's `pc` remotes point at (ssh://$(PC_HOST)/<absolute path>) -
+# used by sync2pc, which runs on the Pi and reaches back to the PC over ssh.
+PC_HOST  ?= chia@chia.local
+# The PC's own absolute path to this workspace - used only by sync2pc.
+# $(WS) means "this workspace" and would resolve to the Pi's own path if
+# used there instead, which is why this exists as a separate variable.
+PC_WS    ?= /home/chia/PICAR2/picar2_ws
 FOCUS    ?= imu
 FORCE    ?=
 LIDAR    ?= ld19   # ld19 | lds02rr | none
@@ -228,6 +235,58 @@ push:
 	@for d in $(WS)/src/*/; do \
 	  git -C "$$d" remote get-url origin 2>/dev/null | grep -q 'vis81' && \
 	    echo "=== $$d ===" && git -C "$$d" push $(if $(FORCE),--force-with-lease) || true; \
+	done
+
+# make checkout BRANCH=soft-wp
+# Switches the meta repo and every repo under src/ to the same local branch,
+# wherever it exists. A repo without that branch is reported and left alone
+# rather than failing the whole command - navigation2's stable line is
+# picar2/1.3.12, not master, so `make checkout BRANCH=master` skips it by
+# design; check that one out on its own when you mean the stable line.
+# PC-side only: plain `git checkout`, no fetch, no force - an uncommitted
+# change that would be overwritten stops it, same as running git by hand.
+checkout:
+	@test -n "$(BRANCH)" || { echo "usage: make checkout BRANCH=<name>"; exit 1; }
+	@git -C $(WS) checkout $(BRANCH) 2>&1 | sed 's/^/[meta] /'
+	@skipped=0; \
+	for d in $(WS)/src/*/; do \
+	  name=$$(basename "$$d"); \
+	  if git -C "$$d" show-ref --verify --quiet "refs/heads/$(BRANCH)"; then \
+	    git -C "$$d" checkout $(BRANCH) 2>&1 | sed "s/^/[$$name] /"; \
+	  else \
+	    skipped=$$((skipped + 1)); \
+	  fi; \
+	done; \
+	[ "$$skipped" -gt 0 ] && echo "($$skipped repo(s) without a local $(BRANCH) branch skipped)" || true
+
+# make sync2pc
+# Run ON THE PI, not the PC: makes this repo and every repo under src/
+# match its PC counterpart exactly - whatever branch that repo happens to
+# be on there, no branch name to remember or keep in sync by hand. Asks
+# the PC over ssh which branch each repo is on, then fetches and
+# force-checks-out exactly that from the `pc` remote (added on first
+# use). Not rsync - see the sync2pi pitfall in CLAUDE.md, a different,
+# banned thing; this is the same git fetch+checkout deploy mechanism
+# `checkout` uses PC-side, run locally on the Pi and following the PC
+# per repo instead of taking one branch name for all of them.
+sync2pc:
+	@sync_one() { \
+	  dir="$$1"; remote_path="$$2"; label="$$3"; \
+	  ( cd "$$dir" && \
+	    git remote get-url pc >/dev/null 2>&1 || git remote add pc "ssh://$(PC_HOST)$$remote_path"; \
+	    branch=$$(ssh $(PC_HOST) "git -C $$remote_path rev-parse --abbrev-ref HEAD" 2>/dev/null); \
+	    if [ -z "$$branch" ] || [ "$$branch" = HEAD ]; then \
+	      echo "[$$label] no such repo on the PC, or its HEAD is detached - skipped"; \
+	    elif git fetch -q pc "$$branch" 2>/dev/null; then \
+	      git checkout -q -f -B "$$branch" "pc/$$branch" && echo "[$$label] -> $$branch: $$(git log --oneline -1)"; \
+	    else \
+	      echo "[$$label] PC is on $$branch but fetching it failed - skipped"; \
+	    fi ); \
+	}; \
+	sync_one . "$(PC_WS)" meta; \
+	for d in src/*/; do \
+	  name=$$(basename "$$d"); \
+	  sync_one "$$d" "$(PC_WS)/src/$$name" "$$name"; \
 	done
 
 build:
