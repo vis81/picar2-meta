@@ -304,6 +304,18 @@ sync2pc:
 build:
 	$(CMD) "source $(ROS_DIST)/setup.bash && colcon build --symlink-install --build-base $(BUILD_BASE) --install-base $(INSTALL_BASE) --packages-ignore multirobot_map_merge"
 
+# make pi-build PI_IP=rpi4.local
+# Runs the full workspace build on the Pi, inside its docker container -
+# the thing to run after `sync2pc` to confirm whatever's now checked out
+# there actually compiles together, not just that git said so. `-tt`
+# forces a pty: `docker exec -it` (what `make build` uses via $(CMD))
+# refuses to attach otherwise over a non-interactive ssh command, and
+# `-t` alone silently no-ops when ssh itself has no local terminal to
+# forward, which is always true here.
+pi-build:
+	@test -n "$(PI_IP)" || { echo "PI_IP is required, e.g. PI_IP=rpi4.local"; exit 1; }
+	ssh -tt pi@$(PI_IP) 'cd ~/picar_ws && EXEC_ENV=docker make build' < /dev/null
+
 clean:
 	$(CMD) "rm -rf $(WS_PATH)/$(BUILD_BASE) $(WS_PATH)/$(INSTALL_BASE) $(WS_PATH)/log"
 
