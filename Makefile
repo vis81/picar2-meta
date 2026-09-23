@@ -319,6 +319,25 @@ pi-build:
 clean:
 	$(CMD) "rm -rf $(WS_PATH)/$(BUILD_BASE) $(WS_PATH)/$(INSTALL_BASE) $(WS_PATH)/log"
 
+# make pi-stack ACTION=restart PI_IP=rpi4.local   (ACTION: start | stop | restart | status)
+# One command for the whole supervisord-managed stack on the Pi at once -
+# bringup, amcl, nav, webui, map, explore - instead of one layer at a time
+# via `docker exec picar2 supervisorctl ... restart <layer>`. Uses
+# supervisorctl's own `all` target. bringup is in there too: this briefly
+# kills ros2_control and the serial link to the STM32, not just the ROS
+# graph, so don't run start/stop/restart while the robot is actually
+# driving - `status` is always safe, it only reads.
+ACTION ?= restart
+pi-stack:
+	@test -n "$(PI_IP)" || { echo "PI_IP is required, e.g. PI_IP=rpi4.local"; exit 1; }
+	@ssh pi@$(PI_IP) "docker exec picar2 supervisorctl -c /ws/etc/supervisord.conf $(ACTION) all" || true
+
+# make stack ACTION=restart
+# The local half of pi-stack: run ON THE PI itself, no ssh/PI_IP needed.
+# Same supervisorctl 'all' target and the same caution about bringup.
+stack:
+	@docker exec picar2 supervisorctl -c /ws/etc/supervisord.conf $(ACTION) all || true
+
 # ── Firmware (Zephyr/west, host-only) ────────────────────────────────────────
 firmware:
 	bash -c "cd $(WS)/src/yahboom && source activate.sh && make"
