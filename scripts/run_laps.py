@@ -59,7 +59,18 @@ def run(args):
     vmin = 99.0
     passes = []
     try:
-        while time.time() - t0 < args.laps * 25 + 90:
+        # 25 s/lap assumed real lap time tracks the requested --speed. Not
+        # true for a controller whose own speed regulation (e.g. VP's
+        # max_lateral_accel) dominates the route's curvy sections regardless
+        # of the ceiling: measured 57.4 s/lap at --speed 0.4 AND 56.8 s/lap at
+        # --speed 0.8, same route, same controller (2026-09-19, VP #22
+        # real-hardware test) - scaling the budget by 1/speed made the second
+        # case *worse*, cutting a 3-lap run to 2. 80 s/lap flat, based on the
+        # slowest measurement plus margin, regardless of --speed: the early
+        # break below still ends things the moment the actual laps are done,
+        # so an over-generous budget here costs nothing, while an
+        # under-generous one silently truncates the test.
+        while time.time() - t0 < args.laps * 80 + 90:
             st = api(host, "/status")
             r = st["route"]
             idx = r.get("index")
@@ -79,7 +90,34 @@ def run(args):
             time.sleep(0.3)
     finally:
         api(host, "/route/stop", {})
+        # /route/stop and /bag off have both reported success once while the
+        # robot kept driving and the bag kept recording for another 12
+        # minutes (2026-09-19) - only actually stopping when the web UI
+        # process itself was restarted. Verify instead of trusting the first
+        # reply: poll for the pose to actually settle and the route to
+        # report inactive, retrying the stop if not, before declaring done.
+        for attempt in range(5):
+            time.sleep(2)
+            p1 = api(host, "/status")["pose"]
+            time.sleep(2)
+            st = api(host, "/status")
+            p2 = st["pose"]
+            moving = abs(p1["x"] - p2["x"]) > 0.01 or abs(p1["y"] - p2["y"]) > 0.01
+            if not moving and not st["route"].get("active"):
+                break
+            print(f"  stop attempt {attempt}: still moving or route active - retrying")
+            api(host, "/route/stop", {})
+        else:
+            print("  WARNING: robot did not settle after 5 stop attempts")
         api(host, "/bag", {"on": False}, 30)
+        # rosbag2 only writes metadata.yaml on a clean shutdown - its
+        # presence is proof the recorder process actually exited, not just
+        # that the API said so.
+        time.sleep(2)
+        closed = subprocess.run(
+            ["ssh", args.ssh, f"test -f {args.remote_bags}/{name}/metadata.yaml"]
+        ).returncode == 0
+        print("bag recorder:", "closed" if closed else "STILL RECORDING")
     laps = [round(b_ - a, 1) for a, b_ in zip(passes, passes[1:])]
     if laps:
         print(f"laps: {laps}  mean {sum(laps) / len(laps):.1f}  min {min(laps)}  max {max(laps)}")
