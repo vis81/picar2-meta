@@ -20,6 +20,11 @@ PC_WS    ?= /home/chia/PICAR2/picar2_ws
 FOCUS    ?= imu
 FORCE    ?=
 LIDAR    ?= ld19   # ld19 | lds02rr | none
+# Which chassis: v1 (original, Pi 4) | v2 (2026-10 short chassis, Pi 5).
+# Picks picar2_description/models/<model>.yaml and
+# picar2_bringup/config/models/<model>/ (geometry, footprint, calibration).
+# On the Pi the stack reads it from /ws/run/model instead (see run-layer.sh).
+ROBOT_MODEL ?= v1
 # base name (no extension) under maps/ for save-map / slam-resume
 MAP      ?= home
 # Available worlds (from src/robotnik_gazebo_worlds/):
@@ -348,12 +353,12 @@ flash:
 # ── Robot bringup (creates the named 'picar2' container in docker mode) ──────
 bringup:
 	$(XHOST)
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT) use_vizanti:=$(USE_VIZANTI) vizanti_port:=$(VIZANTI_PORT) vizanti_rosbridge_port:=$(VIZANTI_ROSBRIDGE_PORT) use_joy:=$(USE_JOY) joy_dev:=$(JOY_ID) joy_config:=$(JOY_CONFIG)"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup picar2.launch.py robot_model:=$(ROBOT_MODEL) lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) sen0628_port:=$(SEN0628_PORT) use_foxglove:=$(USE_FOXGLOVE) foxglove_port:=$(FOXGLOVE_PORT) use_vizanti:=$(USE_VIZANTI) vizanti_port:=$(VIZANTI_PORT) vizanti_rosbridge_port:=$(VIZANTI_ROSBRIDGE_PORT) use_joy:=$(USE_JOY) joy_dev:=$(JOY_ID) joy_config:=$(JOY_CONFIG)"
 
 sim:
 	$(XHOST)
 	$(eval _PATCHED_WORLD := $(shell python3 $(WS)/scripts/patch_gz_world.py $(_WORLD_PATH)))
-	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(_GZ_RESOURCE_PATH) && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) headless:=$(HEADLESS) world:=$(_PATCHED_WORLD) spawn_x:=$(SPAWN_X) spawn_y:=$(SPAWN_Y)"
+	$(CMD) "export GZ_SIM_RESOURCE_PATH=$(_GZ_RESOURCE_PATH) && $(ROS_SETUP) && ros2 launch picar2_bringup sim.launch.py robot_model:=$(ROBOT_MODEL) lidar:=$(LIDAR) use_mag:=$(USE_MAG) use_ld07:=$(USE_LD07) use_sen0628:=$(USE_SEN0628) headless:=$(HEADLESS) world:=$(_PATCHED_WORLD) spawn_x:=$(SPAWN_X) spawn_y:=$(SPAWN_Y)"
 
 # ── Attach targets — exec into running bringup session (docker) / run directly (host) ──
 slam:
@@ -412,10 +417,10 @@ amcl:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup amcl.launch.py map_yaml:=$(WS_PATH)/maps/$(MAP).yaml"
 
 nav:
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py robot_model:=$(ROBOT_MODEL)"
 
 nav-sim:
-	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py use_sim_time:=true"
+	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup nav2.launch.py robot_model:=$(ROBOT_MODEL) use_sim_time:=true"
 
 explore:
 	$(CMD) "$(ROS_SETUP) && ros2 launch picar2_bringup explore.launch.py"
@@ -574,19 +579,19 @@ joystick:
 	$(CMD) "$(ROS_SETUP) && ros2 launch teleop_twist_joy teleop-launch.py joy_dev:=$(JOY_ID) config_filepath:=$(WS_PATH)/$(INSTALL_BASE)/picar2_bringup/share/picar2_bringup/config/$(JOY_CONFIG).yaml"
 
 # Requires bringup running. Guides through 6-position accel calibration.
-# Output saved to src/picar2_bringup/config/imu_calib.yaml
+# Output saved to picar2_bringup/config/models/$(ROBOT_MODEL)/imu_calib.yaml
 imu-calib:
-	$(CMD) "$(ROS_SETUP) && ros2 run imu_calib do_calib_node --ros-args -r imu:=/imu/data_raw -p calib_file:=$(WS_PATH)/src/picar2_bringup/config/imu_calib.yaml"
+	$(CMD) "$(ROS_SETUP) && ros2 run imu_calib do_calib_node --ros-args -r imu:=/imu/data_raw -p calib_file:=$(WS_PATH)/src/picar2-ros2/picar2_bringup/config/models/$(ROBOT_MODEL)/imu_calib.yaml"
 
 # Requires bringup running (Pi). Starts bias observer + remover on PC.
 # Trigger calibration in another terminal:
 #   ros2 service call /calibrate_magnetometer std_srvs/srv/Trigger {}
-# Then rotate the robot 360° for ~30 s. Bias saved to picar2_bringup/config/magnetometer_calib.yaml
+# Then rotate the robot 360° for ~30 s. Bias saved to picar2_bringup/config/models/$(ROBOT_MODEL)/magnetometer_calib.yaml
 mag-calib:
 	$(XHOST)
 	$(CMD) "$(ROS_SETUP_PC) && ros2 launch magnetometer_pipeline bias_remover.launch \
 		two_d_mode:=true \
-		calibration_file_path:=$(WS_PATH)/src/picar2-ros2/picar2_bringup/config/magnetometer_calib.yaml"
+		calibration_file_path:=$(WS_PATH)/src/picar2-ros2/picar2_bringup/config/models/$(ROBOT_MODEL)/magnetometer_calib.yaml"
 
 diag:
 	$(CMD) "bash $(WS_PATH)/scripts/diag.sh"

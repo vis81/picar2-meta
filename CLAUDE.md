@@ -32,6 +32,25 @@ picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, 
   maps/                       ← saved maps (pbstream / posegraph / pgm+yaml)
 ```
 
+## Two robots: `ROBOT_MODEL` / `robot_model`
+
+| Model | Chassis | Computer | MCU board (firmware `BOARD_REV`) | Lidar |
+|---|---|---|---|---|
+| `v1` | original | Pi 4 | Yahboom ROS board (`1.0`) | LD19 |
+| `v2` | 2026-10 short chassis | Pi 5 | YB-ERF01-V3.0 (`3.0`) | TBD |
+
+Everything that follows the chassis lives in two per-model places and nowhere
+else: `picar2_description/models/<model>.yaml` (axle/mount positions, wheel
+radius, steering LUT and servo centre/limits — read by the xacro) and
+`picar2_bringup/config/models/<model>/` (`controllers.yaml` and `nav2.yaml`
+overlays with wheelbase/tracks/footprint/turning radius/inflation, plus
+`imu_calib.yaml` and `magnetometer_calib.yaml`). The shared `controllers.yaml`
+/ `nav2.yaml` carry no chassis numbers. `picar2.launch.py`, `sim.launch.py`,
+`nav2.launch.py` and `display.launch.py` take `robot_model:=` (default `v1`);
+`make` passes `ROBOT_MODEL` (default `v1`); on the Pi `run-layer.sh` appends it
+from `/ws/run/model` (`PICAR_MODEL` overrides) so the file set once per robot
+survives any saved args file. v2's numbers are copies of v1 until measured.
+
 Each `src/*` entry is an independent git repo. `make status` / `make pull` /
 `make push` operate on the meta-repo **and** all sub-repos (push only touches
 `vis81`-owned remotes). Firmware work is documented separately in
@@ -235,14 +254,14 @@ Key behaviours:
 
 | Param | Value |
 |---|---|
-| wheelbase | 0.235 m |
-| traction_track_width | 0.1685 m |
-| steering_track_width | 0.173 m |
-| traction_wheels_radius | 0.033 m (**still marked TODO: calibrate**) |
+| wheelbase | 0.235 m (v1; per model in `config/models/<model>/controllers.yaml`) |
+| traction_track_width | 0.1685 m (v1, per model) |
+| steering_track_width | 0.173 m (v1, per model) |
+| traction_wheels_radius | 0.033 m (v1, per model; **still marked TODO: calibrate**) |
 | update_rate | 50 Hz |
 | reference_timeout | 0.5 s (matches firmware watchdog) |
 | enable_odom_tf | false — EKF owns `odom→base_footprint` |
-| cmd_vel_relay max_angular_vel | 1.2 rad/s |
+| cmd_vel_relay max_angular_vel | 1.2 rad/s (per model) |
 | cmd_vel_relay max_reverse_vel | 0.25 m/s |
 
 EKF (`config/ekf.yaml`): `two_d_mode`, 50 Hz. Takes x/y/yaw/vx from
@@ -262,7 +281,9 @@ Nav2 is configured for a car-like robot that **cannot spin in place**:
   (upstream tree with `<Spin>` stripped), wired in from `nav2.launch.py`.
 - Costmaps: explicit rectangular `footprint` (base_footprint sits at the rear
   axle, chassis extends 40 mm behind it); obstacle sources are `/lidar_node/scan`
-  and `/sen0628/pointcloud`.
+  and `/sen0628/pointcloud`. `footprint`, `inflation_radius` and the planner's
+  `minimum_turning_radius` come from `config/models/<model>/nav2.yaml`, layered
+  between `nav2.yaml` and the optional `params_overlay`.
 - **Right turns need the patched Smac overlay.** Upstream's analytic-expansion
   scoring extrapolates one sample gap across the whole expansion; that gap
   collapses across a cusp, so a path starting with a reversal scores at a
@@ -297,10 +318,10 @@ ignores `/initialpose` regardless of its `mode` parameter.
 | What | Where | How |
 |---|---|---|
 | Wheel radius | `controllers.yaml` `traction_wheels_radius` | straight-line test, `make odom-cal` |
-| Steering LUT | `picar2.urdf.xacro` `steer_lut_us` / `steer_lut_rad` | measured wheel angles; refine with the odom_cal circle test |
-| Accel/gyro | `config/imu_calib.yaml` | `make imu-calib` (6-position routine, needs bringup running) |
-| Magnetometer hard-iron | `config/magnetometer_calib.yaml` | `make mag-calib` on the PC, then `ros2 service call /calibrate_magnetometer std_srvs/srv/Trigger {}` and rotate 360° for ~30 s |
-| Servo centers, gyro bias | STM32 settings (persistent) | Zephyr shell on `/dev/ttyYahboom1` |
+| Steering LUT | `picar2_description/models/<model>.yaml` `steer_lut_us` / `steer_lut_rad` | measured wheel angles; refine with the odom_cal circle test |
+| Accel/gyro | `config/models/<model>/imu_calib.yaml` | `make imu-calib ROBOT_MODEL=…` (6-position routine, needs bringup running) |
+| Magnetometer hard-iron | `config/models/<model>/magnetometer_calib.yaml` | `make mag-calib ROBOT_MODEL=…` on the PC, then `ros2 service call /calibrate_magnetometer std_srvs/srv/Trigger {}` and rotate 360° for ~30 s |
+| Servo centre + soft limits, gyro bias | STM32 settings (persistent) | Zephyr shell on `/dev/ttyYahboom1`: `servo center 0 <us>`, `servo limits 0 <min> <max>`; the model yaml records the values |
 | IMU sanity check | — | `make imu-verify` (`imu_verify.py`) |
 
 ## Devices (udev, `etc/99-picar.rules`)

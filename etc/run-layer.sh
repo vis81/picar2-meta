@@ -35,6 +35,17 @@ if [ -z "$profile" ] && [ -r /ws/run/profile ]; then
 fi
 profile="${profile:-robot}"
 
+# v1 | v2 - which chassis this Pi is bolted to. Set once per robot in
+# /ws/run/model (run/ is not in git, so the file cannot follow a sync to the
+# other robot); PICAR_MODEL overrides it. Appended to every layer whose launch
+# file takes it, so a saved args file (nav.args from the web UI, say) cannot
+# silently drop the robot back to v1.
+model="${PICAR_MODEL:-}"
+if [ -z "$model" ] && [ -r /ws/run/model ]; then
+    model="$(cat /ws/run/model)"
+fi
+model="${model:-v1}"
+
 # A simulator on the same DDS domain as the robot is a hazard, not a
 # convenience: both are on the same LAN, topic names are identical, and the
 # sim's /cmd_vel would drive the real vehicle. Put sim on its own domain, the
@@ -141,6 +152,9 @@ if [ -z "$args" ]; then
 fi
 
 extra="$(sim_time_arg "$layer")"
+case "$layer" in
+    bringup|nav) extra="$extra robot_model:=$model" ;;
+esac
 echo "run-layer.sh: [$profile] $layer -> ros2 launch picar2_bringup $args $extra"
 # Unquoted on purpose: the args hold several whitespace-separated arguments and
 # must word-split.
