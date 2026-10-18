@@ -162,7 +162,12 @@ div.maprow { background: var(--bg); border: 1px solid var(--line);
 
 /* ── joystick ───────────────────────────────────────────────────────── */
 .stick {
-  position: fixed; right: 18px; bottom: calc(150px + env(safe-area-inset-bottom));
+  /* Sits just above the footer, whose height changes with the mode (the
+     mapping row stacks the pill, three buttons and Route). app.js keeps
+     --controls-h equal to the footer's rendered height; the fallback is
+     only for the instant before the first measurement. */
+  position: fixed; right: 18px;
+  bottom: calc(var(--controls-h, 150px) + 18px);
   width: 132px; height: 132px; border-radius: 50%; z-index: 3;
   background: rgba(26,31,40,.75); border: 1px solid var(--line);
   backdrop-filter: blur(6px);

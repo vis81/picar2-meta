@@ -563,8 +563,10 @@ function renderControls() {
   $('route').textContent = route.active
     ? 'Stop route'
     : (route.waypoints.length ? `Route (${route.waypoints.length})` : 'Route');
-  // Manual driving is available in both modes.
-  $('stick').classList.toggle('hidden', mode === 'idle');
+  // Manual driving is available in every mode, Off included: the drive
+  // path only needs bringup, which is always up, and a robot without a
+  // lidar yet is still worth steering around.
+  $('stick').classList.remove('hidden');
 
   $('explore').textContent = !modes.explore ? 'Explore automatically'
     : exploreStatus === 'exploration_complete' ? 'Search again'
@@ -900,6 +902,16 @@ $('confirm-save').onclick = async () => {
 
 const stick = $('stick'), knob = $('knob');
 let stickId = null, driveTimer = null, cmd = { linear: 0, angular: 0 };
+
+// Keep the stick clear of the footer. The footer's height depends on which
+// buttons the mode shows (and on how they wrap on a narrow phone), so the
+// stick's bottom offset follows the measured height instead of a constant.
+// The footer's bottom padding already includes the safe-area inset.
+const controls = $('controls');
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--controls-h',
+    `${controls.offsetHeight}px`);
+}).observe(controls);
 
 function stickMove(t) {
   const r = stick.getBoundingClientRect();
