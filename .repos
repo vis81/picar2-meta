@@ -62,3 +62,9 @@ repositories:
     type: git
     url: https://github.com/vis81/navigation2.git
     version: picar2/1.3.12
+  # Slamtec's own ROS 2 driver (SDK 2.1.0) for v2's RPLIDAR C1. The apt
+  # ros-jazzy-rplidar-ros (SDK 1.12) connects but cannot start a C1 scan.
+  sllidar_ros2:
+    type: git
+    url: https://github.com/Slamtec/sllidar_ros2.git
+    version: 34300099fadfc772965962dec837bf436706188f

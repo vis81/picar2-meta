@@ -19,7 +19,7 @@ PC_HOST  ?= chia@chia.local
 PC_WS    ?= /home/chia/PICAR2/picar2_ws
 FOCUS    ?= imu
 FORCE    ?=
-LIDAR    ?= ld19   # ld19 | lds02rr | none
+LIDAR    ?= ld19   # ld19 | lds02rr | c1 | none
 # Which chassis: v1 (original, Pi 4) | v2 (2026-10 short chassis, Pi 5).
 # Picks picar2_description/models/<model>.yaml and
 # picar2_bringup/config/models/<model>/ (geometry, footprint, calibration).

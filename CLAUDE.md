@@ -24,6 +24,7 @@ picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, 
     lds02rr_lidar/            ← LDS02RR (Neato XV-11) driver
     ldrobot_ld07/             ← LD07 structured-light depth sensor driver
     ldrobot-lidar-ros2/       ← LD19 lidar (our fork: survives a USB replug)
+    sllidar_ros2/             ← Slamtec RPLIDAR C1 driver (upstream, pinned; SDK 2.1.0)
     sen0628_tof/              ← SEN0628 matrix ToF driver (C++, ours); tof_imager_ros/ is the Python original
     vizanti/                  ← web mission planner (external, forked)
     explore_lite/             ← frontier exploration (external)
@@ -37,7 +38,7 @@ picar2_ws/                    ← this repo (Makefile, Dockerfile, DDS configs, 
 | Model | Chassis | Computer | MCU board (firmware `BOARD_REV`) | Lidar |
 |---|---|---|---|---|
 | `v1` | original | Pi 4 | Yahboom ROS board (`1.0`) | LD19 |
-| `v2` | 2026-10 short chassis | Pi 5 | YB-ERF01-V3.0 (`3.0`) | TBD |
+| `v2` | 2026-10 short chassis | Pi 5 | YB-ERF01-V3.0 (`3.0`) | RPLIDAR C1 |
 
 Everything that follows the chassis lives in two per-model places and nowhere
 else: `picar2_description/models/<model>.yaml` (axle/mount positions, wheel
@@ -132,7 +133,7 @@ amd64 only. `make image-pi` cross-builds the arm64 image via QEMU/buildx,
 
 | Target | What it does |
 |---|---|
-| `make bringup` | Full stack — see Nodes below. Knobs: `LIDAR` (`ld19`\|`lds02rr`\|`none`), `USE_MAG`, `USE_SEN0628`, `USE_FOXGLOVE`, `USE_VIZANTI`, `USE_JOY`, `JOY_CONFIG` |
+| `make bringup` | Full stack — see Nodes below. Knobs: `LIDAR` (`ld19`\|`lds02rr`\|`c1`\|`none`), `USE_MAG`, `USE_SEN0628`, `USE_FOXGLOVE`, `USE_VIZANTI`, `USE_JOY`, `JOY_CONFIG` |
 | `make cartographer` | Cartographer SLAM (**preferred**) |
 | `make save-cartographer-map MAP=home` | `finish_trajectory` + `write_state` → `maps/home.pbstream`, plus a PGM/YAML via `map_saver_cli` |
 | `make cartographer-resume MAP=home` | Resume mapping on a saved pbstream |
@@ -179,7 +180,7 @@ copy under `/tmp`. Companion targets: `slam-sim`, `nav-sim`, `explore-sim`.
 | `mag_bias_observer` + `magnetometer_bias_remover` | magnetometer_pipeline | `/imu/mag` → `/imu/mag_unbiased` (only when `use_mag:=true`) |
 | `imu_filter_madgwick` | imu_filter_madgwick | → `/imu/data`, ENU, `publish_tf:=false` |
 | `ekf_node` | robot_localization | wheel odom + IMU yaw rate → `/odom` + `odom→base_footprint` TF |
-| lidar | lds02rr_lidar **or** ldlidar_component (LD19, lifecycle + composable container + lifecycle_manager) | `/lidar_node/scan` |
+| lidar | lds02rr_lidar **or** ldlidar_component (LD19, lifecycle + composable container + lifecycle_manager) **or** sllidar_node (C1, v2) | `/lidar_node/scan` |
 | `tof_imager` | tof_imager_ros | SEN0628 front ToF → `/sen0628/pointcloud` (lifecycle, auto-configured/activated in the launch file) |
 | `ldrobot_ld07_node` | ldrobot_ld07 | legacy front depth sensor, superseded by SEN0628 |
 | `foxglove_bridge` | foxglove_bridge | `ws://<pi>:8765` |
@@ -327,7 +328,7 @@ ignores `/initialpose` regardless of its `mode` parameter.
 ## Devices (udev, `etc/99-picar.rules`)
 
 `/dev/ttyYahboom0` (STM32 protocol, 460800) · `/dev/ttyYahboom1` (Zephyr shell,
-921600) · `/dev/ldlidar` (LD19) · `/dev/ld07` · `/dev/sen0628`.
+921600) · `/dev/ldlidar` (LD19) · `/dev/rplidar` (C1) · `/dev/ld07` · `/dev/sen0628`.
 `make install-uarts` also installs `zephyr-shell.service`, exposing the shell on
 TCP 4444 (`putty -raw <pi-ip> 4444`).
 
