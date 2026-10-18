@@ -581,7 +581,7 @@ joystick:
 # Requires bringup running. Guides through 6-position accel calibration.
 # Output saved to picar2_bringup/config/models/$(ROBOT_MODEL)/imu_calib.yaml
 imu-calib:
-	$(CMD) "$(ROS_SETUP) && ros2 run imu_calib do_calib_node --ros-args -r imu:=/imu/data_raw -p calib_file:=$(WS_PATH)/src/picar2-ros2/picar2_bringup/config/models/$(ROBOT_MODEL)/imu_calib.yaml"
+	$(CMD) "$(ROS_SETUP) && ros2 run imu_calib do_calib_node --ros-args -r imu:=/imu/data_raw -p output_file:=$(WS_PATH)/src/picar2-ros2/picar2_bringup/config/models/$(ROBOT_MODEL)/imu_calib.yaml"
 
 # Requires bringup running (Pi). Starts bias observer + remover on PC.
 # Trigger calibration in another terminal:
